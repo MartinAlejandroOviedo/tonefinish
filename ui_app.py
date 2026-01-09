@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sys
 from datetime import datetime
@@ -182,6 +183,13 @@ else:
 
             def addItems(self, items) -> None:
                 self._items.extend(items)
+
+            def clear(self) -> None:
+                self._items = []
+                self._current_index = 0
+
+            def setEditable(self, *args, **kwargs) -> None:
+                pass
 
             def setCurrentIndex(self, index: int) -> None:
                 self._current_index = index
@@ -994,12 +1002,17 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.signature_comment_edit.setMinimumHeight(80)
             self.signature_url_edit = QLineEdit()
             self.signature_email_edit = QLineEdit()
+            self.signature_label_edit = QLineEdit()
             self.signature_company_edit = QLineEdit("SABE Software")
             self.signature_company_edit.setReadOnly(True)
             default_year = datetime.now().year
             self.signature_copyright_edit.setText(
                 f"(c) {default_year} <Artist>. Procesado por SABE Software."
             )
+            self.signature_preset_combo = QComboBox()
+            self.signature_preset_combo.setEditable(True)
+            self.signature_save_btn = QPushButton("Guardar preset")
+            self.signature_delete_btn = QPushButton("Eliminar preset")
 
             self.batch_input_edit = QLineEdit()
             self.batch_input_button = QPushButton("Carpeta entrada...")
@@ -1299,12 +1312,19 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             signature_layout = QVBoxLayout()
             signature_layout.setSpacing(6)
             signature_layout.setContentsMargins(8, 8, 8, 8)
+            signature_preset_layout = QHBoxLayout()
+            signature_preset_layout.addWidget(QLabel("Preset firma:"))
+            signature_preset_layout.addWidget(self.signature_preset_combo)
+            signature_preset_layout.addWidget(self.signature_save_btn)
+            signature_preset_layout.addWidget(self.signature_delete_btn)
+            signature_layout.addLayout(signature_preset_layout)
             signature_form = QFormLayout()
             signature_form.addRow("Artist / Creator:", self.signature_artist_edit)
             signature_form.addRow("Copyright:", self.signature_copyright_edit)
             signature_form.addRow("Comments:", self.signature_comment_edit)
             signature_form.addRow("URL (opcional):", self.signature_url_edit)
             signature_form.addRow("Email (opcional):", self.signature_email_edit)
+            signature_form.addRow("Sello discografico:", self.signature_label_edit)
             signature_form.addRow("Company / Marca:", self.signature_company_edit)
             signature_layout.addLayout(signature_form)
             signature_help = QLabel(
@@ -1361,9 +1381,13 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.output_preset_combo.currentIndexChanged.connect(self._apply_output_preset)
             self.output_format_combo.currentIndexChanged.connect(self._apply_output_format)
             self.mode_combo.currentIndexChanged.connect(lambda: self._on_mode_changed(allow_navigation=True))
+            self.signature_save_btn.clicked.connect(self._save_signature_preset)
+            self.signature_delete_btn.clicked.connect(self._delete_signature_preset)
+            self.signature_preset_combo.currentIndexChanged.connect(self._load_signature_preset)
             self._apply_preset()
             self._apply_output_preset()
             self._apply_output_format()
+            self._refresh_signature_presets()
 
         def choose_input(self) -> None:
             file_path, _ = QFileDialog.getOpenFileName(
@@ -1942,6 +1966,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             comment = self.signature_comment_edit.toPlainText().strip()
             url = self.signature_url_edit.text().strip()
             email = self.signature_email_edit.text().strip()
+            label = self.signature_label_edit.text().strip()
             company = self.signature_company_edit.text().strip()
 
             if not artist or not copyright_text or not comment:
@@ -1962,7 +1987,89 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 metadata["url"] = url
             if email:
                 metadata["contact"] = email
+            if label:
+                metadata["label"] = label
             return metadata
+
+        def _signature_preset_path(self) -> pathlib.Path:
+            base = pathlib.Path.home() / ".tonefinish"
+            base.mkdir(parents=True, exist_ok=True)
+            return base / "signature_presets.json"
+
+        def _load_signature_presets(self) -> Dict[str, Dict[str, str]]:
+            path = self._signature_preset_path()
+            if not path.exists():
+                return {}
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {str(k): dict(v) for k, v in data.items() if isinstance(v, dict)}
+            except Exception:
+                pass
+            return {}
+
+        def _save_signature_presets(self, presets: Dict[str, Dict[str, str]]) -> None:
+            path = self._signature_preset_path()
+            path.write_text(json.dumps(presets, ensure_ascii=True, indent=2), encoding="utf-8")
+
+        def _current_signature_fields(self) -> Dict[str, str]:
+            return {
+                "artist": self.signature_artist_edit.text().strip(),
+                "copyright": self.signature_copyright_edit.text().strip(),
+                "comment": self.signature_comment_edit.toPlainText().strip(),
+                "url": self.signature_url_edit.text().strip(),
+                "email": self.signature_email_edit.text().strip(),
+                "label": self.signature_label_edit.text().strip(),
+                "company": self.signature_company_edit.text().strip(),
+            }
+
+        def _apply_signature_fields(self, data: Dict[str, str]) -> None:
+            self.signature_artist_edit.setText(data.get("artist", ""))
+            self.signature_copyright_edit.setText(data.get("copyright", ""))
+            self.signature_comment_edit.setPlainText(data.get("comment", ""))
+            self.signature_url_edit.setText(data.get("url", ""))
+            self.signature_email_edit.setText(data.get("email", ""))
+            self.signature_label_edit.setText(data.get("label", ""))
+            if data.get("company"):
+                self.signature_company_edit.setText(data.get("company", "SABE Software"))
+
+        def _refresh_signature_presets(self) -> None:
+            presets = self._load_signature_presets()
+            current = self.signature_preset_combo.currentText()
+            self.signature_preset_combo.clear()
+            if presets:
+                self.signature_preset_combo.addItems(sorted(presets.keys()))
+            if current:
+                self.signature_preset_combo.setCurrentText(current)
+
+        def _save_signature_preset(self) -> None:
+            name = self.signature_preset_combo.currentText().strip()
+            if not name:
+                self._show_error("Indica un nombre para el preset de firma.")
+                return
+            presets = self._load_signature_presets()
+            presets[name] = self._current_signature_fields()
+            self._save_signature_presets(presets)
+            self._refresh_signature_presets()
+            self.signature_preset_combo.setCurrentText(name)
+
+        def _delete_signature_preset(self) -> None:
+            name = self.signature_preset_combo.currentText().strip()
+            if not name:
+                return
+            presets = self._load_signature_presets()
+            if name in presets:
+                presets.pop(name, None)
+                self._save_signature_presets(presets)
+                self._refresh_signature_presets()
+
+        def _load_signature_preset(self) -> None:
+            name = self.signature_preset_combo.currentText().strip()
+            if not name:
+                return
+            presets = self._load_signature_presets()
+            if name in presets:
+                self._apply_signature_fields(presets[name])
 
         def _apply_preset(self) -> None:
             self._apply_lufs_preset(self.preset_combo.currentText())
