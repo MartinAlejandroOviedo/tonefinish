@@ -298,9 +298,16 @@ else:
                 Expanding = 0
                 Minimum = 0
 
+        class _QtPlaceholder:
+            AlignCenter = 0
+
+            class AlignmentFlag:
+                AlignCenter = 0
+
         QCheckBox = QComboBox = QDoubleSpinBox = QFileDialog = QLabel = QLineEdit = QPlainTextEdit = QProgressBar = QPushButton = QSpacerItem = QTabWidget = QTableWidget = QTableWidgetItem = _QtWidgetPlaceholder  # type: ignore
         QFormLayout = QHBoxLayout = QVBoxLayout = QLayoutPlaceholder  # type: ignore
         QSvgWidget = _QtWidgetPlaceholder  # type: ignore
+        Qt = _QtPlaceholder  # type: ignore
         PYSIDE_AVAILABLE = False
 
 
@@ -1092,10 +1099,10 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 logo.setMinimumWidth(96)
                 logo.setMinimumHeight(96)
                 start_layout.addWidget(logo)
-                start_layout.setAlignment(logo, Qt.AlignCenter)
+                start_layout.setAlignment(logo, Qt.AlignmentFlag.AlignCenter)
 
             title = QLabel(f"{APP_NAME} {APP_VERSION} — {APP_VENDOR}")
-            title.setAlignment(Qt.AlignCenter)
+            title.setAlignment(Qt.AlignmentFlag.AlignCenter)
             start_layout.addWidget(title)
 
             intro = QLabel(
@@ -1956,27 +1963,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             if email:
                 metadata["contact"] = email
             return metadata
-
-        def _collect_signature_report(self) -> Dict[str, str]:
-            artist = self.signature_artist_edit.text().strip()
-            copyright_text = self.signature_copyright_edit.text().strip()
-            comment = self.signature_comment_edit.toPlainText().strip()
-            url = self.signature_url_edit.text().strip()
-            email = self.signature_email_edit.text().strip()
-            company = self.signature_company_edit.text().strip()
-            if "<Artist>" in copyright_text and artist:
-                copyright_text = copyright_text.replace("<Artist>", artist)
-            report: Dict[str, str] = {
-                "artist": artist,
-                "comment": comment,
-                "copyright": copyright_text,
-                "company": company,
-            }
-            if url:
-                report["url"] = url
-            if email:
-                report["email"] = email
-            return report
 
         def _apply_preset(self) -> None:
             self._apply_lufs_preset(self.preset_combo.currentText())
