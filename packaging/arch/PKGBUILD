@@ -1,0 +1,41 @@
+pkgname=tonefinish
+pkgver=1.0.3
+pkgrel=1
+pkgdesc="Audio finisher con analisis y normalizacion (ToneFinish)"
+arch=('any')
+url="https://github.com/MartinAlejandroOviedo/tonefinish"
+license=('custom:Proprietary')
+depends=('python' 'ffmpeg')
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+install=${pkgname}.install
+
+# PLACEHOLDER: completa el PKGBUILD para AUR.
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -d "${pkgdir}/usr/lib/tonefinish"
+  install -d "${pkgdir}/usr/bin"
+  install -d "${pkgdir}/usr/share/applications"
+  install -d "${pkgdir}/usr/share/icons/hicolor/scalable/apps"
+
+  install -m644 audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py "${pkgdir}/usr/lib/tonefinish/"
+  install -m644 requirements.txt VERSION README.md "${pkgdir}/usr/lib/tonefinish/"
+  install -m644 assets/tonefinish.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/tonefinish.svg"
+  install -m644 packaging/deb/tonefinish.desktop "${pkgdir}/usr/share/applications/tonefinish.desktop"
+
+  cat > "${pkgdir}/usr/bin/tonefinish" <<'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+BASE_DIR = "/usr/lib/tonefinish"
+VENV_PY = os.path.join(BASE_DIR, ".venv", "bin", "python")
+if os.path.exists(VENV_PY):
+    os.execv(VENV_PY, [VENV_PY, os.path.join(BASE_DIR, "main.py")])
+sys.path.insert(0, BASE_DIR)
+from main import main
+if __name__ == "__main__":
+    raise SystemExit(main())
+EOF
+  chmod 0755 "${pkgdir}/usr/bin/tonefinish"
+}

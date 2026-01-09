@@ -1,0 +1,47 @@
+{
+  "id": "com.sabe.ToneFinish",
+  "runtime": "org.kde.Platform",
+  "runtime-version": "6.7",
+  "sdk": "org.kde.Sdk",
+  "command": "tonefinish",
+  "finish-args": [
+    "--filesystem=home",
+    "--share=network",
+    "--socket=x11",
+    "--socket=wayland",
+    "--device=dri"
+  ],
+  "add-extensions": {
+    "org.freedesktop.Platform.ffmpeg-full": {
+      "directory": "lib/ffmpeg",
+      "version": "6.7",
+      "add-ld-path": "lib",
+      "merge-dirs": "lib"
+    }
+  },
+  "modules": [
+    {
+      "name": "tonefinish",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -d /app/tonefinish",
+        "cp -a audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py /app/tonefinish/",
+        "cp -a requirements.txt VERSION README.md /app/tonefinish/",
+        "install -d /app/share/applications",
+        "install -d /app/share/icons/hicolor/scalable/apps",
+        "cp -a packaging/deb/tonefinish.desktop /app/share/applications/tonefinish.desktop",
+        "cp -a assets/tonefinish.svg /app/share/icons/hicolor/scalable/apps/tonefinish.svg",
+        "pip3 install --prefix=/app -r requirements.txt",
+        "install -d /app/bin",
+        "cat > /app/bin/tonefinish <<'EOF'\n#!/usr/bin/env bash\nexec /app/bin/python /app/tonefinish/main.py\nEOF\n",
+        "chmod 0755 /app/bin/tonefinish"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}

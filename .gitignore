@@ -11,3 +11,10 @@ __pycache__/
 
 # Artefactos de audio de prueba
 *.wav
+
+# Script local
+packaging/build_all.sh
+
+# Releases locales
+releases/
+packaging/build_deb.sh
