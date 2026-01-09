@@ -227,7 +227,6 @@ def write_analysis_toml(
     deesser: bool,
     fade_in: float,
     fade_out: float,
-    signature: Dict[str, str] | None,
     before_stats: Dict[str, float],
     before_band: Dict[str, float],
     before_voice: float | None,
@@ -287,11 +286,6 @@ def write_analysis_toml(
         lines.append(f'output_sample_rate = {output_sr}')
     if output_bit_depth is not None:
         lines.append(f'output_bit_depth = "{_toml_escape(output_bit_depth)}"')
-    if signature:
-        lines.append("[signature]")
-        for key, value in signature.items():
-            if value:
-                lines.append(f'{key} = "{_toml_escape(value)}"')
 
     lines.extend(render_block("before", before_stats, before_band, before_voice, before_rating, before_advice))
     if after_stats is not None and after_band is not None and after_rating is not None and after_advice is not None:

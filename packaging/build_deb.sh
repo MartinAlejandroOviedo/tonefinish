@@ -77,6 +77,7 @@ EOF
 chmod 0755 "${pkg_dir}/usr/bin/tonefinish"
 
 install -m 0644 "${root_dir}/README.md" "${pkg_dir}/usr/lib/${package_name}/README.md"
+install -m 0644 "${root_dir}/VERSION" "${pkg_dir}/usr/lib/${package_name}/VERSION"
 install -m 0644 "${root_dir}/requirements.txt" "${pkg_dir}/usr/lib/${package_name}/requirements.txt"
 
 for file in audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py; do

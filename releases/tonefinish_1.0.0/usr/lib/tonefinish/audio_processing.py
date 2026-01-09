@@ -167,7 +167,6 @@ def normalize_audio(
     output_sr: int | None = None,
     output_bit_depth: str | None = None,
     output_format: str | None = None,
-    metadata: Dict[str, str] | None = None,
     fade_in: float = 0.0,
     fade_out: float = 0.0,
     transparent_mode: bool = False,
@@ -250,12 +249,6 @@ def normalize_audio(
         elif output_bit_depth == "16":
             codec_args.extend(["-c:a", "pcm_s16le"])
 
-    metadata_args: list[str] = []
-    if metadata:
-        for key, value in metadata.items():
-            if value:
-                metadata_args.extend(["-metadata", f"{key}={value}"])
-
     if filter_chain:
         tail_filters = [loudnorm_filter]
         if brickwall:
@@ -273,7 +266,6 @@ def normalize_audio(
             filter_complex,
             "-map",
             "[out]",
-            *metadata_args,
             *codec_args,
             str(output_path),
         ]
@@ -293,7 +285,6 @@ def normalize_audio(
             str(input_path),
             "-af",
             loudnorm_filter,
-            *metadata_args,
             *codec_args,
             str(output_path),
         ]

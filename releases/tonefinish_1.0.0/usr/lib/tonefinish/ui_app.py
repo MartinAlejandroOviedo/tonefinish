@@ -1,6 +1,5 @@
 import pathlib
 import sys
-from datetime import datetime
 from typing import Dict, TYPE_CHECKING
 
 from audio_analysis import (
@@ -366,7 +365,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             glue_attack_ms: float,
             glue_release_ms: float,
             glue_makeup_db: float,
-            metadata: Dict[str, str] | None,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -393,7 +391,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.glue_attack_ms = glue_attack_ms
             self.glue_release_ms = glue_release_ms
             self.glue_makeup_db = glue_makeup_db
-            self.metadata = metadata
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -423,7 +420,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     glue_attack_ms=self.glue_attack_ms,
                     glue_release_ms=self.glue_release_ms,
                     glue_makeup_db=self.glue_makeup_db,
-                    metadata=self.metadata,
                     fade_in=self.fade_in,
                     fade_out=self.fade_out,
                     transparent_mode=self.transparent_mode,
@@ -461,7 +457,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             glue_attack_ms: float,
             glue_release_ms: float,
             glue_makeup_db: float,
-            metadata: Dict[str, str] | None,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -489,7 +484,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.glue_attack_ms = glue_attack_ms
             self.glue_release_ms = glue_release_ms
             self.glue_makeup_db = glue_makeup_db
-            self.metadata = metadata
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -578,7 +572,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         glue_attack_ms=self.glue_attack_ms,
                         glue_release_ms=self.glue_release_ms,
                         glue_makeup_db=self.glue_makeup_db,
-                        metadata=self.metadata,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -622,7 +615,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         deesser=self.deesser,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
-                        signature=self.metadata,
                         before_stats=stats,
                         before_band=band_stats,
                         before_voice=voice_rms,
@@ -654,7 +646,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         deesser=self.deesser,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
-                        signature=self.metadata,
                         before_stats=stats,
                         before_band=band_stats,
                         before_voice=voice_rms,
@@ -712,7 +703,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             glue_attack_ms: float,
             glue_release_ms: float,
             glue_makeup_db: float,
-            metadata: Dict[str, str] | None,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -740,7 +730,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.glue_attack_ms = glue_attack_ms
             self.glue_release_ms = glue_release_ms
             self.glue_makeup_db = glue_makeup_db
-            self.metadata = metadata
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -824,7 +813,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         glue_attack_ms=self.glue_attack_ms,
                         glue_release_ms=self.glue_release_ms,
                         glue_makeup_db=self.glue_makeup_db,
-                        metadata=self.metadata,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -856,7 +844,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         deesser=self.deesser,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
-                        signature=self.metadata,
                         before_stats=stats,
                         before_band=band_stats,
                         before_voice=voice_rms,
@@ -980,19 +967,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.glue_makeup_spin.setDecimals(1)
             self.glue_makeup_spin.setValue(0.0)
             self.glue_makeup_spin.setSuffix(" dB")
-
-            self.signature_artist_edit = QLineEdit()
-            self.signature_copyright_edit = QLineEdit()
-            self.signature_comment_edit = QPlainTextEdit()
-            self.signature_comment_edit.setMinimumHeight(80)
-            self.signature_url_edit = QLineEdit()
-            self.signature_email_edit = QLineEdit()
-            self.signature_company_edit = QLineEdit("SABE Software")
-            self.signature_company_edit.setReadOnly(True)
-            default_year = datetime.now().year
-            self.signature_copyright_edit.setText(
-                f"(c) {default_year} <Artist>. Procesado por SABE Software."
-            )
 
             self.batch_input_edit = QLineEdit()
             self.batch_input_button = QPushButton("Carpeta entrada...")
@@ -1287,27 +1261,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             presets_layout.addWidget(presets_help)
             tab_presets.setLayout(presets_layout)
 
-            tab_signature = QWidget()
-            self.tab_signature = tab_signature
-            signature_layout = QVBoxLayout()
-            signature_layout.setSpacing(6)
-            signature_layout.setContentsMargins(8, 8, 8, 8)
-            signature_form = QFormLayout()
-            signature_form.addRow("Artist / Creator:", self.signature_artist_edit)
-            signature_form.addRow("Copyright:", self.signature_copyright_edit)
-            signature_form.addRow("Comments:", self.signature_comment_edit)
-            signature_form.addRow("URL (opcional):", self.signature_url_edit)
-            signature_form.addRow("Email (opcional):", self.signature_email_edit)
-            signature_form.addRow("Company / Marca:", self.signature_company_edit)
-            signature_layout.addLayout(signature_form)
-            signature_help = QLabel(
-                "Estos datos se insertan en los WAV de salida (audio unico y lote). "
-                "Artist, Copyright y Comments son obligatorios."
-            )
-            signature_help.setWordWrap(True)
-            signature_layout.addWidget(signature_help)
-            tab_signature.setLayout(signature_layout)
-
             tab_about = QWidget()
             about_layout = QVBoxLayout()
             about_layout.setSpacing(6)
@@ -1329,7 +1282,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             tabs.addTab(tab_single, "Audio")
             tabs.addTab(tab_batch, "Lote")
             tabs.addTab(tab_presets, "Presets")
-            tabs.addTab(tab_signature, "Firma Digital")
             tabs.addTab(tab_process, "Procesos")
             tabs.addTab(tab_results, "Resultados")
             tabs.addTab(tab_about, "About")
@@ -1457,9 +1409,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             if self.analyze_only_cb.isChecked():
                 self.append_log("Modo 'Solo analizar' activo: no se realizará escritura de salida.")
                 return
-            metadata = self._collect_signature_metadata()
-            if metadata is None:
-                return
 
             worker = NormalizeWorker(
                 input_path=input_path,
@@ -1483,7 +1432,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_attack_ms=self.glue_attack_spin.value(),
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
-                metadata=metadata,
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1507,11 +1455,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             output_format = self._resolve_output_format_for_single()
             output_path = ensure_output_path(output_path, output_format)
             self.output_edit.setText(str(output_path))
-            metadata = None
-            if not self.analyze_only_cb.isChecked():
-                metadata = self._collect_signature_metadata()
-                if metadata is None:
-                    return
 
             worker = ProcessWorker(
                 input_path=input_path,
@@ -1536,7 +1479,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_attack_ms=self.glue_attack_spin.value(),
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
-                metadata=metadata,
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1562,9 +1504,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             selected_files = self._get_selected_batch_files()
             if not selected_files:
                 self._show_error("No hay archivos seleccionados para procesar.")
-                return
-            metadata = self._collect_signature_metadata()
-            if metadata is None:
                 return
             self._set_progress(current=0, total=len(selected_files), message="Procesando lote...")
             output_dir_text = self.batch_output_edit.text().strip()
@@ -1599,7 +1538,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_attack_ms=self.glue_attack_spin.value(),
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
-                metadata=metadata,
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1928,55 +1866,6 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
         def _show_error(self, message: str) -> None:
             self.append_log(f"Error: {message}")
-
-        def _collect_signature_metadata(self) -> Dict[str, str] | None:
-            artist = self.signature_artist_edit.text().strip()
-            copyright_text = self.signature_copyright_edit.text().strip()
-            comment = self.signature_comment_edit.toPlainText().strip()
-            url = self.signature_url_edit.text().strip()
-            email = self.signature_email_edit.text().strip()
-            company = self.signature_company_edit.text().strip()
-
-            if not artist or not copyright_text or not comment:
-                self._show_error("Completa Artist/Creator, Copyright y Comments en Firma Digital.")
-                return None
-
-            if "<Artist>" in copyright_text:
-                copyright_text = copyright_text.replace("<Artist>", artist)
-
-            metadata: Dict[str, str] = {
-                "artist": artist,
-                "comment": comment,
-                "copyright": copyright_text,
-                "publisher": company,
-                "encoded_by": company,
-            }
-            if url:
-                metadata["url"] = url
-            if email:
-                metadata["contact"] = email
-            return metadata
-
-        def _collect_signature_report(self) -> Dict[str, str]:
-            artist = self.signature_artist_edit.text().strip()
-            copyright_text = self.signature_copyright_edit.text().strip()
-            comment = self.signature_comment_edit.toPlainText().strip()
-            url = self.signature_url_edit.text().strip()
-            email = self.signature_email_edit.text().strip()
-            company = self.signature_company_edit.text().strip()
-            if "<Artist>" in copyright_text and artist:
-                copyright_text = copyright_text.replace("<Artist>", artist)
-            report: Dict[str, str] = {
-                "artist": artist,
-                "comment": comment,
-                "copyright": copyright_text,
-                "company": company,
-            }
-            if url:
-                report["url"] = url
-            if email:
-                report["email"] = email
-            return report
 
         def _apply_preset(self) -> None:
             self._apply_lufs_preset(self.preset_combo.currentText())
