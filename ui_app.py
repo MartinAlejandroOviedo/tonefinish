@@ -239,6 +239,12 @@ else:
             def setItem(self, *args, **kwargs) -> None:
                 pass
 
+            def horizontalHeader(self) -> "_QtWidgetPlaceholder":
+                return self
+
+            def setStretchLastSection(self, *args, **kwargs) -> None:
+                pass
+
             def addTab(self, widget: object, label: str) -> None:
                 self._tabs.append((widget, label))
 
@@ -287,7 +293,7 @@ else:
         PYSIDE_AVAILABLE = False
 
 
-if PYSIDE_AVAILABLE:
+if PYSIDE_AVAILABLE or TYPE_CHECKING:
     class AnalyzeWorker(QObject):
         finished = Signal(dict, dict, list, object, str)
         error = Signal(str)
@@ -832,24 +838,8 @@ if PYSIDE_AVAILABLE:
             self.output_format_combo.setCurrentIndex(0)
 
             self.mode_combo = QComboBox()
-            self.mode_combo.addItems(["Audio unico", "Lote", "Solo analizar"])
+            self.mode_combo.addItems(["Manual", "Audio unico", "Lote", "Solo analizar"])
             self.mode_combo.setCurrentIndex(0)
-
-            self.batch_preset_combo = QComboBox()
-            self.batch_preset_combo.addItems(list(LOUDNESS_PRESETS.keys()))
-            self.batch_preset_combo.setCurrentIndex(0)
-
-            self.batch_target_spin = QDoubleSpinBox()
-            self.batch_target_spin.setRange(-60.0, 0.0)
-            self.batch_target_spin.setDecimals(1)
-            self.batch_target_spin.setValue(-14.0)
-            self.batch_target_spin.setSuffix(" LUFS")
-
-            self.batch_true_peak_spin = QDoubleSpinBox()
-            self.batch_true_peak_spin.setRange(-20.0, 0.0)
-            self.batch_true_peak_spin.setDecimals(1)
-            self.batch_true_peak_spin.setValue(-1.5)
-            self.batch_true_peak_spin.setSuffix(" dBTP")
 
             self._syncing_lufs = False
 
@@ -893,11 +883,6 @@ if PYSIDE_AVAILABLE:
             self.batch_select_all_btn.clicked.connect(lambda: self._set_batch_selection(True))
             self.batch_select_none_btn.clicked.connect(lambda: self._set_batch_selection(False))
 
-            self.batch_progress_label = QLabel("0/0")
-            self.batch_progress_bar = QProgressBar()
-            self.batch_progress_bar.setRange(0, 1)
-            self.batch_progress_bar.setValue(0)
-
             self.batch_process_btn = QPushButton("Procesar lote")
             self._batch_files: list[pathlib.Path] = []
 
@@ -932,10 +917,19 @@ if PYSIDE_AVAILABLE:
 
             self.results_table = QTableWidget(5, 3)
             self.results_table.setHorizontalHeaderLabels(["Métrica", "Antes", "Después"])
+            self.results_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.results_table.horizontalHeader().setStretchLastSection(True)
 
             self.log_view = QPlainTextEdit()
             self.log_view.setReadOnly(True)
             self.log_view.setMinimumHeight(160)
+
+            self.global_progress_label = QLabel("Listo")
+            self.global_progress_bar = QProgressBar()
+            self.global_progress_bar.setRange(0, 1)
+            self.global_progress_bar.setValue(0)
+
+            self.batch_summary_label = QLabel("-")
 
             self._build_layout()
             self._wire_events()
@@ -945,10 +939,6 @@ if PYSIDE_AVAILABLE:
             self._on_mode_changed(allow_navigation=False)
             self.tabs.setCurrentIndex(0)
 
-            self.batch_target_spin.valueChanged.connect(self._sync_lufs_from_batch)
-            self.batch_true_peak_spin.valueChanged.connect(self._sync_lufs_from_batch)
-            self.target_spin.valueChanged.connect(self._sync_lufs_from_main)
-            self.true_peak_spin.valueChanged.connect(self._sync_lufs_from_main)
 
         def _build_layout(self) -> None:
             layout = QVBoxLayout()
@@ -980,14 +970,6 @@ if PYSIDE_AVAILABLE:
             single_output_layout.addWidget(self.output_button)
             tab_single_layout.addLayout(single_output_layout)
 
-            single_form = QFormLayout()
-            single_form.addRow("Preset LUFS:", self.preset_combo)
-            single_form.addRow("Preset salida:", self.output_preset_combo)
-            single_form.addRow("Formato salida:", self.output_format_combo)
-            single_form.addRow("Target LUFS:", self.target_spin)
-            single_form.addRow("True Peak:", self.true_peak_spin)
-            tab_single_layout.addLayout(single_form)
-
             self.analyze_btn.setVisible(False)
             self.normalize_btn.setVisible(False)
             tab_single_layout.addWidget(self.process_btn)
@@ -1010,10 +992,6 @@ if PYSIDE_AVAILABLE:
             batch_layout.addLayout(batch_out_layout)
 
             batch_form = QFormLayout()
-            batch_form.addRow("Preset LUFS:", self.batch_preset_combo)
-            batch_form.addRow("Target LUFS:", self.batch_target_spin)
-            batch_form.addRow("True Peak:", self.batch_true_peak_spin)
-            batch_form.addRow("Formato salida:", self.output_format_combo)
             batch_form.addRow("Sufijo:", self.batch_suffix_edit)
             batch_layout.addLayout(batch_form)
             batch_layout.addWidget(QLabel("Archivos encontrados:"))
@@ -1022,11 +1000,6 @@ if PYSIDE_AVAILABLE:
             batch_select_layout.addWidget(self.batch_select_all_btn)
             batch_select_layout.addWidget(self.batch_select_none_btn)
             batch_layout.addLayout(batch_select_layout)
-            batch_progress_layout = QHBoxLayout()
-            batch_progress_layout.addWidget(QLabel("Progreso:"))
-            batch_progress_layout.addWidget(self.batch_progress_bar)
-            batch_progress_layout.addWidget(self.batch_progress_label)
-            batch_layout.addLayout(batch_progress_layout)
             batch_layout.addWidget(self.batch_process_btn)
             tab_batch.setLayout(batch_layout)
 
@@ -1055,6 +1028,8 @@ if PYSIDE_AVAILABLE:
             tab_results = QWidget()
             self.tab_results = tab_results
             results_layout = QVBoxLayout()
+            self.single_results_container = QWidget()
+            single_results_layout = QVBoxLayout()
             stats_layout = QFormLayout()
             stats_layout.addRow("Input I (LUFS):", self.input_i_label)
             stats_layout.addRow("Input TP (dBTP):", self.input_tp_label)
@@ -1062,19 +1037,30 @@ if PYSIDE_AVAILABLE:
             stats_layout.addRow("Threshold (dB):", self.threshold_label)
             stats_layout.addRow("Offset recomendado:", self.offset_label)
             stats_layout.addRow(f"{VOICE_BAND[0]}:", self.voice_band_label)
-            results_layout.addLayout(stats_layout)
+            single_results_layout.addLayout(stats_layout)
 
             eq_layout = QFormLayout()
             for label, _low, _high, _attack, _release, _width in BAND_CONFIG:
                 value_label = QLabel("-")
                 self.band_labels[label] = value_label
                 eq_layout.addRow(label + ":", value_label)
-            results_layout.addLayout(eq_layout)
+            single_results_layout.addLayout(eq_layout)
 
-            results_layout.addWidget(QLabel("Sugerencias EQ:"))
-            results_layout.addWidget(self.eq_suggestions)
-            results_layout.addWidget(QLabel("Resultados (Antes / Después):"))
-            results_layout.addWidget(self.results_table)
+            self.single_results_container.setLayout(single_results_layout)
+            results_layout.addWidget(self.single_results_container)
+
+            results_tabs = QTabWidget()
+
+            tab_eq = QWidget()
+            tab_eq_layout = QVBoxLayout()
+            tab_eq_layout.addWidget(self.eq_suggestions)
+            tab_eq.setLayout(tab_eq_layout)
+
+            tab_single_results = QWidget()
+            tab_single_layout = QVBoxLayout()
+            tab_single_layout.addWidget(self.results_table)
+            tab_single_results.setLayout(tab_single_layout)
+
             self.batch_results_table = QTableWidget(0, 9)
             self.batch_results_table.setHorizontalHeaderLabels(
                 [
@@ -1089,20 +1075,56 @@ if PYSIDE_AVAILABLE:
                     "Rating despues",
                 ]
             )
-            results_layout.addWidget(QLabel("Resultados de lote:"))
-            results_layout.addWidget(self.batch_results_table)
-            results_layout.addWidget(QLabel("Log:"))
-            results_layout.addWidget(self.log_view)
+            tab_batch_results = QWidget()
+            tab_batch_results_layout = QVBoxLayout()
+            tab_batch_results_layout.addWidget(self.batch_results_table)
+            tab_batch_results.setLayout(tab_batch_results_layout)
+
+            tab_batch_summary = QWidget()
+            tab_batch_summary_layout = QVBoxLayout()
+            tab_batch_summary_layout.addWidget(self.batch_summary_label)
+            tab_batch_summary.setLayout(tab_batch_summary_layout)
+
+            tab_log = QWidget()
+            tab_log_layout = QVBoxLayout()
+            tab_log_layout.addWidget(self.log_view)
+            tab_log.setLayout(tab_log_layout)
+
+            results_tabs.addTab(tab_eq, "Sugerencias EQ")
+            results_tabs.addTab(tab_single_results, "Antes / Después")
+            results_tabs.addTab(tab_batch_results, "Resultados lote")
+            results_tabs.addTab(tab_batch_summary, "Resumen lote")
+            results_tabs.addTab(tab_log, "Logs")
+            results_layout.addWidget(results_tabs)
             tab_results.setLayout(results_layout)
+
+            tab_presets = QWidget()
+            self.tab_presets = tab_presets
+            presets_layout = QVBoxLayout()
+            presets_form = QFormLayout()
+            presets_form.addRow("Preset LUFS:", self.preset_combo)
+            presets_form.addRow("Target LUFS:", self.target_spin)
+            presets_form.addRow("True Peak:", self.true_peak_spin)
+            presets_form.addRow("Preset salida:", self.output_preset_combo)
+            presets_form.addRow("Formato salida:", self.output_format_combo)
+            presets_layout.addLayout(presets_form)
+            tab_presets.setLayout(presets_layout)
 
             tabs.addTab(tab_single, "Audio")
             tabs.addTab(tab_batch, "Lote")
+            tabs.addTab(tab_presets, "Presets")
             tabs.addTab(tab_process, "Procesos")
             tabs.addTab(tab_results, "Resultados")
             tabs.insertTab(0, tab_start, "Inicio")
             tabs.setCurrentIndex(0)
 
+            progress_layout = QHBoxLayout()
+            progress_layout.addWidget(QLabel("Progreso:"))
+            progress_layout.addWidget(self.global_progress_bar)
+            progress_layout.addWidget(self.global_progress_label)
+
             layout.addWidget(tabs)
+            layout.addLayout(progress_layout)
             self.setLayout(layout)
 
         def _wire_events(self) -> None:
@@ -1111,12 +1133,10 @@ if PYSIDE_AVAILABLE:
             self.process_btn.clicked.connect(self.start_process)
             self.batch_process_btn.clicked.connect(self.start_batch_process)
             self.preset_combo.currentIndexChanged.connect(self._apply_preset)
-            self.batch_preset_combo.currentIndexChanged.connect(self._apply_batch_preset)
             self.output_preset_combo.currentIndexChanged.connect(self._apply_output_preset)
             self.output_format_combo.currentIndexChanged.connect(self._apply_output_format)
             self.mode_combo.currentIndexChanged.connect(lambda: self._on_mode_changed(allow_navigation=True))
             self._apply_preset()
-            self._apply_batch_preset()
             self._apply_output_preset()
             self._apply_output_format()
 
@@ -1197,6 +1217,7 @@ if PYSIDE_AVAILABLE:
                 worker,
                 on_finished=self._handle_analyze_finished,
             )
+            self._set_progress(indeterminate=True, message="Analizando...")
             self._set_busy(True, "Analizando...")
 
         def start_normalize(self) -> None:
@@ -1243,6 +1264,7 @@ if PYSIDE_AVAILABLE:
                 worker,
                 on_finished=self._handle_normalize_finished,
             )
+            self._set_progress(indeterminate=True, message="Normalizando...")
             self._set_busy(True, "Normalizando...")
 
         def start_process(self) -> None:
@@ -1283,6 +1305,7 @@ if PYSIDE_AVAILABLE:
                 worker,
                 on_finished=self._handle_process_finished,
             )
+            self._set_progress(indeterminate=True, message="Procesando...")
             self._set_busy(True, "Procesando...")
 
         def start_batch_process(self) -> None:
@@ -1300,9 +1323,7 @@ if PYSIDE_AVAILABLE:
             if not selected_files:
                 self._show_error("No hay archivos seleccionados para procesar.")
                 return
-            self.batch_progress_bar.setRange(0, len(selected_files))
-            self.batch_progress_bar.setValue(0)
-            self.batch_progress_label.setText(f"0/{len(selected_files)}")
+            self._set_progress(current=0, total=len(selected_files), message="Procesando lote...")
             output_dir_text = self.batch_output_edit.text().strip()
             output_dir: pathlib.Path | None = None
             if output_dir_text:
@@ -1390,6 +1411,7 @@ if PYSIDE_AVAILABLE:
         ) -> None:
             self.last_stats = stats
             self.last_band_stats = band_stats
+            self._show_single_results()
             self._update_stats_display(stats)
             self._update_voice_display(voice_rms)
             self.append_log("Análisis completado.")
@@ -1414,6 +1436,7 @@ if PYSIDE_AVAILABLE:
         ) -> None:
             self.last_stats = stats
             self.last_band_stats = band_stats
+            self._show_single_results()
             self._update_stats_display(stats)
             self._update_voice_display(voice_rms)
             self._update_eq_display(band_stats, suggestions)
@@ -1430,12 +1453,13 @@ if PYSIDE_AVAILABLE:
 
         def _handle_batch_finished(self, message: str, results: object) -> None:
             self.append_log(message)
-            total = self.batch_progress_bar.maximum() if hasattr(self.batch_progress_bar, "maximum") else None
-            if isinstance(total, int):
-                self.batch_progress_bar.setValue(total)
             if isinstance(results, list):
+                self._set_progress(current=len(results), total=len(results), message=message)
+            if isinstance(results, list):
+                self._show_batch_results()
                 self._update_batch_results_table(results)
-                self.tabs.setCurrentIndex(4)
+                self._update_batch_summary(results)
+                self.tabs.setCurrentIndex(5)
 
         def _handle_normalize_finished(self, log: str, output_path: str) -> None:
             self.append_log(f"Normalización completada -> {output_path}")
@@ -1489,6 +1513,78 @@ if PYSIDE_AVAILABLE:
                 for col_idx, value in enumerate(values):
                     self.batch_results_table.setItem(row_idx, col_idx, QTableWidgetItem(str(value)))
 
+        def _update_batch_summary(self, results: list[dict]) -> None:
+            if not results:
+                self.batch_summary_label.setText("-")
+                return
+            def avg(values: list[float]) -> float:
+                return sum(values) / len(values) if values else 0.0
+            before_i = []
+            after_i = []
+            before_tp = []
+            after_tp = []
+            before_lra = []
+            after_lra = []
+            for item in results:
+                before = item.get("before", {})
+                after = item.get("after", {})
+                if isinstance(before, dict):
+                    before_i.append(float(before.get("input_i", 0.0)))
+                    before_tp.append(float(before.get("input_tp", 0.0)))
+                    before_lra.append(float(before.get("input_lra", 0.0)))
+                if isinstance(after, dict):
+                    after_i.append(float(after.get("input_i", 0.0)))
+                    after_tp.append(float(after.get("input_tp", 0.0)))
+                    after_lra.append(float(after.get("input_lra", 0.0)))
+            summary = (
+                f"Promedios: I {avg(before_i):.2f} -> {avg(after_i):.2f} LUFS | "
+                f"TP {avg(before_tp):.2f} -> {avg(after_tp):.2f} dBTP | "
+                f"LRA {avg(before_lra):.2f} -> {avg(after_lra):.2f} LU"
+            )
+            self.batch_summary_label.setText(summary)
+
+        def _show_single_results(self) -> None:
+            self.single_results_container.setVisible(True)
+
+        def _show_batch_results(self) -> None:
+            self._clear_single_results()
+            self.single_results_container.setVisible(False)
+
+        def _clear_single_results(self) -> None:
+            self.input_i_label.setText("-")
+            self.input_tp_label.setText("-")
+            self.input_lra_label.setText("-")
+            self.threshold_label.setText("-")
+            self.offset_label.setText("-")
+            self.voice_band_label.setText("-")
+            for label_widget in self.band_labels.values():
+                label_widget.setText("-")
+            self.eq_suggestions.setPlainText("")
+            self.results_table.setRowCount(0)
+
+        def _set_progress(
+            self,
+            current: int | None = None,
+            total: int | None = None,
+            message: str | None = None,
+            indeterminate: bool = False,
+        ) -> None:
+            if indeterminate:
+                self.global_progress_bar.setRange(0, 0)
+                self.global_progress_bar.setValue(0)
+                self.global_progress_label.setText(message or "Trabajando...")
+                return
+            if total is None:
+                total = 1
+            if current is None:
+                current = 0
+            self.global_progress_bar.setRange(0, max(1, total))
+            self.global_progress_bar.setValue(min(current, total))
+            if message:
+                self.global_progress_label.setText(message)
+            else:
+                self.global_progress_label.setText(f"{current}/{total}")
+
         def _update_results_table(
             self,
             before_stats: Dict[str, float],
@@ -1532,24 +1628,28 @@ if PYSIDE_AVAILABLE:
             self.batch_table.setEnabled(not busy)
             self.batch_select_all_btn.setEnabled(not busy)
             self.batch_select_none_btn.setEnabled(not busy)
-            self.batch_progress_bar.setEnabled(True)
             if message:
                 self.append_log(message)
+            if not busy:
+                self._set_progress(current=0, total=1, message="Listo")
 
         def _handle_worker_progress(self, *args) -> None:
             if len(args) >= 3 and isinstance(args[1], int) and isinstance(args[2], int):
                 message = str(args[0])
                 current = args[1]
                 total = args[2]
-                self.batch_progress_bar.setRange(0, max(1, total))
-                self.batch_progress_bar.setValue(current)
-                self.batch_progress_label.setText(f"{current}/{total}")
+                self._set_progress(current=current, total=total, message=message)
                 self.append_log(message)
             elif args:
                 self.append_log(str(args[0]))
 
         def _on_mode_changed(self, allow_navigation: bool = True) -> None:
             mode = self.mode_combo.currentText()
+            if mode == "Manual":
+                self.tabs.setTabEnabled(1, True)
+                self.tabs.setTabEnabled(2, True)
+                self.analyze_only_cb.setEnabled(True)
+                return
             if mode == "Lote":
                 self.tabs.setTabEnabled(1, False)
                 self.tabs.setTabEnabled(2, True)
@@ -1580,12 +1680,9 @@ if PYSIDE_AVAILABLE:
             self.append_log(f"Error: {message}")
 
         def _apply_preset(self) -> None:
-            self._apply_lufs_preset(self.preset_combo.currentText(), source="main")
+            self._apply_lufs_preset(self.preset_combo.currentText())
 
-        def _apply_batch_preset(self) -> None:
-            self._apply_lufs_preset(self.batch_preset_combo.currentText(), source="batch")
-
-        def _apply_lufs_preset(self, preset_name: str, source: str) -> None:
+        def _apply_lufs_preset(self, preset_name: str) -> None:
             preset = LOUDNESS_PRESETS.get(preset_name)
             if preset is None:
                 return
@@ -1594,26 +1691,15 @@ if PYSIDE_AVAILABLE:
                 return
             self._syncing_lufs = True
             try:
-                if source == "main":
-                    self.batch_preset_combo.setCurrentText(preset_name)
-                else:
-                    self.preset_combo.setCurrentText(preset_name)
-
                 if is_manual:
                     self.target_spin.setEnabled(True)
                     self.true_peak_spin.setEnabled(True)
-                    self.batch_target_spin.setEnabled(True)
-                    self.batch_true_peak_spin.setEnabled(True)
                 else:
                     target, true_peak = preset
                     self.target_spin.setValue(target)
                     self.true_peak_spin.setValue(true_peak)
-                    self.batch_target_spin.setValue(target)
-                    self.batch_true_peak_spin.setValue(true_peak)
                     self.target_spin.setEnabled(False)
                     self.true_peak_spin.setEnabled(False)
-                    self.batch_target_spin.setEnabled(False)
-                    self.batch_true_peak_spin.setEnabled(False)
             finally:
                 self._syncing_lufs = False
 
@@ -1635,29 +1721,6 @@ if PYSIDE_AVAILABLE:
             self.sample_rate_combo.setEnabled(False)
             self.bit_depth_combo.setEnabled(False)
 
-        def _sync_lufs_from_batch(self, _value: float) -> None:
-            if self._syncing_lufs:
-                return
-            if self.batch_preset_combo.currentText() != "Manual":
-                return
-            self._syncing_lufs = True
-            try:
-                self.target_spin.setValue(self.batch_target_spin.value())
-                self.true_peak_spin.setValue(self.batch_true_peak_spin.value())
-            finally:
-                self._syncing_lufs = False
-
-        def _sync_lufs_from_main(self, _value: float) -> None:
-            if self._syncing_lufs:
-                return
-            if self.preset_combo.currentText() != "Manual":
-                return
-            self._syncing_lufs = True
-            try:
-                self.batch_target_spin.setValue(self.target_spin.value())
-                self.batch_true_peak_spin.setValue(self.true_peak_spin.value())
-            finally:
-                self._syncing_lufs = False
 
         def _apply_output_format(self) -> None:
             fmt = self._get_output_format()
