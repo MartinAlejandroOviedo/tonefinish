@@ -43,3 +43,33 @@ INPUT_FORMATS = [".wav", ".aiff", ".aif", ".flac"]
 OUTPUT_FORMATS = ["wav", "aiff", "flac", "m4a", "mp3"]
 MP3_BITRATE = "320k"
 M4A_BITRATE = "256k"
+
+APP_NAME = "ToneFinish"
+APP_VENDOR = "SABE software"
+
+def _load_version() -> str:
+    try:
+        from pathlib import Path
+        version_path = Path(__file__).resolve().parent / "VERSION"
+        if version_path.exists():
+            return version_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return "0.0.0"
+
+APP_VERSION = _load_version()
+
+def _logo_path() -> str:
+    try:
+        from pathlib import Path
+        local = Path(__file__).resolve().parent / "assets" / "tonefinish.svg"
+        if local.exists():
+            return str(local)
+        system = Path("/usr/share/icons/hicolor/scalable/apps/tonefinish.svg")
+        if system.exists():
+            return str(system)
+    except Exception:
+        pass
+    return "assets/tonefinish.svg"
+
+LOGO_PATH = _logo_path()

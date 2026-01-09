@@ -14,10 +14,14 @@ from audio_analysis import (
 from audio_processing import build_preprocess_chain, ensure_output_path, normalize_audio
 from audio_tools import ensure_ffmpeg_available
 from config import (
+    APP_NAME,
+    APP_VENDOR,
+    APP_VERSION,
     BAND_CONFIG,
     DEFAULT_BAND_RANGE_DB,
     DEFAULT_MAX_ADJUST_DB,
     INPUT_FORMATS,
+    LOGO_PATH,
     LOUDNESS_PRESETS,
     OUTPUT_PRESETS,
     OUTPUT_FORMATS,
@@ -27,7 +31,8 @@ from config import (
 )
 
 if TYPE_CHECKING:
-    from PySide6.QtCore import QObject, QThread, Signal
+    from PySide6.QtCore import QObject, QThread, Signal, Qt
+    from PySide6.QtSvgWidgets import QSvgWidget
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -53,7 +58,8 @@ if TYPE_CHECKING:
 else:
     PYSIDE_AVAILABLE = False
     try:
-        from PySide6.QtCore import QObject, QThread, Signal
+        from PySide6.QtCore import QObject, QThread, Signal, Qt
+        from PySide6.QtSvgWidgets import QSvgWidget
         from PySide6.QtWidgets import (
             QApplication,
             QCheckBox,
@@ -165,6 +171,9 @@ else:
                 pass
 
             def setText(self, *args, **kwargs) -> None:
+                pass
+
+            def setAlignment(self, *args, **kwargs) -> None:
                 pass
 
             def text(self) -> str:
@@ -290,6 +299,7 @@ else:
 
         QCheckBox = QComboBox = QDoubleSpinBox = QFileDialog = QLabel = QLineEdit = QPlainTextEdit = QProgressBar = QPushButton = QSpacerItem = QTabWidget = QTableWidget = QTableWidgetItem = _QtWidgetPlaceholder  # type: ignore
         QFormLayout = QHBoxLayout = QVBoxLayout = QLayoutPlaceholder  # type: ignore
+        QSvgWidget = _QtWidgetPlaceholder  # type: ignore
         PYSIDE_AVAILABLE = False
 
 
@@ -349,6 +359,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             output_format: str | None,
             stereo_width: bool,
             deesser: bool,
+            glue_enabled: bool,
+            glue_threshold_db: float,
+            glue_ratio: float,
+            glue_attack_ms: float,
+            glue_release_ms: float,
+            glue_makeup_db: float,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -369,6 +385,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.output_format = output_format
             self.stereo_width = stereo_width
             self.deesser = deesser
+            self.glue_enabled = glue_enabled
+            self.glue_threshold_db = glue_threshold_db
+            self.glue_ratio = glue_ratio
+            self.glue_attack_ms = glue_attack_ms
+            self.glue_release_ms = glue_release_ms
+            self.glue_makeup_db = glue_makeup_db
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -392,6 +414,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     output_format=self.output_format,
                     stereo_width=self.stereo_width,
                     deesser=self.deesser,
+                    glue_enabled=self.glue_enabled,
+                    glue_threshold_db=self.glue_threshold_db,
+                    glue_ratio=self.glue_ratio,
+                    glue_attack_ms=self.glue_attack_ms,
+                    glue_release_ms=self.glue_release_ms,
+                    glue_makeup_db=self.glue_makeup_db,
                     fade_in=self.fade_in,
                     fade_out=self.fade_out,
                     transparent_mode=self.transparent_mode,
@@ -423,6 +451,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             loudness_preset: str,
             output_preset: str,
             deesser: bool,
+            glue_enabled: bool,
+            glue_threshold_db: float,
+            glue_ratio: float,
+            glue_attack_ms: float,
+            glue_release_ms: float,
+            glue_makeup_db: float,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -444,6 +478,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.loudness_preset = loudness_preset
             self.output_preset = output_preset
             self.deesser = deesser
+            self.glue_enabled = glue_enabled
+            self.glue_threshold_db = glue_threshold_db
+            self.glue_ratio = glue_ratio
+            self.glue_attack_ms = glue_attack_ms
+            self.glue_release_ms = glue_release_ms
+            self.glue_makeup_db = glue_makeup_db
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -476,6 +516,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     dynamic_eq=dynamic_eq,
                     stereo_width=self.stereo_width,
                     deesser=self.deesser,
+                    glue_enabled=self.glue_enabled,
+                    glue_threshold_db=self.glue_threshold_db,
+                    glue_ratio=self.glue_ratio,
+                    glue_attack_ms=self.glue_attack_ms,
+                    glue_release_ms=self.glue_release_ms,
+                    glue_makeup_db=self.glue_makeup_db,
                     band_range_db=band_range,
                     max_adjust_db=max_adjust,
                 )
@@ -520,6 +566,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         output_format=self.output_format,
                         stereo_width=self.stereo_width,
                         deesser=self.deesser,
+                        glue_enabled=self.glue_enabled,
+                        glue_threshold_db=self.glue_threshold_db,
+                        glue_ratio=self.glue_ratio,
+                        glue_attack_ms=self.glue_attack_ms,
+                        glue_release_ms=self.glue_release_ms,
+                        glue_makeup_db=self.glue_makeup_db,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -645,6 +697,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             loudness_preset: str,
             output_preset: str,
             deesser: bool,
+            glue_enabled: bool,
+            glue_threshold_db: float,
+            glue_ratio: float,
+            glue_attack_ms: float,
+            glue_release_ms: float,
+            glue_makeup_db: float,
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
@@ -666,6 +724,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.loudness_preset = loudness_preset
             self.output_preset = output_preset
             self.deesser = deesser
+            self.glue_enabled = glue_enabled
+            self.glue_threshold_db = glue_threshold_db
+            self.glue_ratio = glue_ratio
+            self.glue_attack_ms = glue_attack_ms
+            self.glue_release_ms = glue_release_ms
+            self.glue_makeup_db = glue_makeup_db
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
@@ -706,6 +770,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         dynamic_eq=dynamic_eq,
                         stereo_width=self.stereo_width,
                         deesser=self.deesser,
+                        glue_enabled=self.glue_enabled,
+                        glue_threshold_db=self.glue_threshold_db,
+                        glue_ratio=self.glue_ratio,
+                        glue_attack_ms=self.glue_attack_ms,
+                        glue_release_ms=self.glue_release_ms,
+                        glue_makeup_db=self.glue_makeup_db,
                         band_range_db=band_range,
                         max_adjust_db=max_adjust,
                     )
@@ -737,6 +807,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         output_format=fmt,
                         stereo_width=self.stereo_width,
                         deesser=self.deesser,
+                        glue_enabled=self.glue_enabled,
+                        glue_threshold_db=self.glue_threshold_db,
+                        glue_ratio=self.glue_ratio,
+                        glue_attack_ms=self.glue_attack_ms,
+                        glue_release_ms=self.glue_release_ms,
+                        glue_makeup_db=self.glue_makeup_db,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -863,6 +939,35 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.fade_out_spin.setValue(0.0)
             self.fade_out_spin.setSuffix(" s")
 
+            self.glue_threshold_spin = QDoubleSpinBox()
+            self.glue_threshold_spin.setRange(-60.0, 0.0)
+            self.glue_threshold_spin.setDecimals(1)
+            self.glue_threshold_spin.setValue(-18.0)
+            self.glue_threshold_spin.setSuffix(" dB")
+
+            self.glue_ratio_spin = QDoubleSpinBox()
+            self.glue_ratio_spin.setRange(1.0, 10.0)
+            self.glue_ratio_spin.setDecimals(2)
+            self.glue_ratio_spin.setValue(1.6)
+
+            self.glue_attack_spin = QDoubleSpinBox()
+            self.glue_attack_spin.setRange(1.0, 200.0)
+            self.glue_attack_spin.setDecimals(0)
+            self.glue_attack_spin.setValue(20.0)
+            self.glue_attack_spin.setSuffix(" ms")
+
+            self.glue_release_spin = QDoubleSpinBox()
+            self.glue_release_spin.setRange(20.0, 1000.0)
+            self.glue_release_spin.setDecimals(0)
+            self.glue_release_spin.setValue(120.0)
+            self.glue_release_spin.setSuffix(" ms")
+
+            self.glue_makeup_spin = QDoubleSpinBox()
+            self.glue_makeup_spin.setRange(-6.0, 6.0)
+            self.glue_makeup_spin.setDecimals(1)
+            self.glue_makeup_spin.setValue(0.0)
+            self.glue_makeup_spin.setSuffix(" dB")
+
             self.batch_input_edit = QLineEdit()
             self.batch_input_button = QPushButton("Carpeta entrada...")
             self.batch_input_button.clicked.connect(self.choose_batch_input)
@@ -894,11 +999,13 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.stereo_width_cb = QCheckBox("Stereo width por bandas")
             self.deesser_cb = QCheckBox("De-Esser (sibilancia)")
             self.transparent_cb = QCheckBox("Modo transparente")
+            self.glue_cb = QCheckBox("Glue compression")
             self.dynamic_eq_cb.setChecked(True)
             self.brickwall_cb.setChecked(True)
             self.stereo_width_cb.setChecked(True)
             self.deesser_cb.setChecked(False)
             self.transparent_cb.setChecked(True)
+            self.glue_cb.setChecked(False)
 
             self.analyze_btn = QPushButton("Analizar")
             self.normalize_btn = QPushButton("Normalizar")
@@ -952,12 +1059,36 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             start_form = QFormLayout()
             start_form.addRow("Modo de trabajo:", self.mode_combo)
             start_layout.addLayout(start_form)
-            start_layout.addWidget(QLabel("Elige Audio unico para un archivo o Lote para procesar varios."))
+            if PYSIDE_AVAILABLE and LOGO_PATH:
+                logo = QSvgWidget(LOGO_PATH)
+                logo.setMaximumWidth(120)
+                logo.setMaximumHeight(120)
+                logo.setMinimumWidth(96)
+                logo.setMinimumHeight(96)
+                start_layout.addWidget(logo)
+                start_layout.setAlignment(logo, Qt.AlignCenter)
+
+            title = QLabel(f"{APP_NAME} {APP_VERSION} — {APP_VENDOR}")
+            title.setAlignment(Qt.AlignCenter)
+            start_layout.addWidget(title)
+
+            intro = QLabel(
+                f"Bienvenido a {APP_NAME}.\n\n"
+                "Selecciona el modo de trabajo:\n"
+                "- Manual: habilita Audio y Lote para ajustar todo libremente.\n"
+                "- Audio unico: procesa un solo archivo con analisis completo.\n"
+                "- Lote: procesa una carpeta; cada archivo se analiza y ajusta por separado.\n"
+                "- Solo analizar: analiza sin escribir salida."
+            )
+            intro.setWordWrap(True)
+            start_layout.addWidget(intro)
             tab_start.setLayout(start_layout)
 
             tab_single = QWidget()
             self.tab_single = tab_single
             tab_single_layout = QVBoxLayout()
+            tab_single_layout.setSpacing(6)
+            tab_single_layout.setContentsMargins(8, 8, 8, 8)
             single_input_layout = QHBoxLayout()
             single_input_layout.addWidget(QLabel("Entrada:"))
             single_input_layout.addWidget(self.input_edit)
@@ -973,6 +1104,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.analyze_btn.setVisible(False)
             self.normalize_btn.setVisible(False)
             tab_single_layout.addWidget(self.process_btn)
+            audio_help = QLabel(
+                "Selecciona un archivo de entrada y una ruta de salida. "
+                "Luego presiona \"Procesar audio\" para analizar, ajustar y re-analizar el resultado."
+            )
+            audio_help.setWordWrap(True)
+            tab_single_layout.addWidget(audio_help)
             tab_single.setLayout(tab_single_layout)
 
             tab_batch = QWidget()
@@ -1011,6 +1148,11 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             settings_form.addRow("Bit depth:", self.bit_depth_combo)
             settings_form.addRow("Fade in:", self.fade_in_spin)
             settings_form.addRow("Fade out:", self.fade_out_spin)
+            settings_form.addRow("Glue threshold:", self.glue_threshold_spin)
+            settings_form.addRow("Glue ratio:", self.glue_ratio_spin)
+            settings_form.addRow("Glue attack:", self.glue_attack_spin)
+            settings_form.addRow("Glue release:", self.glue_release_spin)
+            settings_form.addRow("Glue makeup:", self.glue_makeup_spin)
             process_layout.addLayout(settings_form)
 
             options_layout = QVBoxLayout()
@@ -1022,6 +1164,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             options_layout.addWidget(self.stereo_width_cb)
             options_layout.addWidget(self.deesser_cb)
             options_layout.addWidget(self.transparent_cb)
+            options_layout.addWidget(self.glue_cb)
             process_layout.addLayout(options_layout)
             tab_process.setLayout(process_layout)
 
@@ -1101,6 +1244,8 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             tab_presets = QWidget()
             self.tab_presets = tab_presets
             presets_layout = QVBoxLayout()
+            presets_layout.setSpacing(6)
+            presets_layout.setContentsMargins(8, 8, 8, 8)
             presets_form = QFormLayout()
             presets_form.addRow("Preset LUFS:", self.preset_combo)
             presets_form.addRow("Target LUFS:", self.target_spin)
@@ -1108,13 +1253,38 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             presets_form.addRow("Preset salida:", self.output_preset_combo)
             presets_form.addRow("Formato salida:", self.output_format_combo)
             presets_layout.addLayout(presets_form)
+            presets_help = QLabel(
+                "Usa Manual para editar valores. Los presets afectan audio unico y lote. "
+                "El true peak se respeta al final con limiter."
+            )
+            presets_help.setWordWrap(True)
+            presets_layout.addWidget(presets_help)
             tab_presets.setLayout(presets_layout)
+
+            tab_about = QWidget()
+            about_layout = QVBoxLayout()
+            about_layout.setSpacing(6)
+            about_layout.setContentsMargins(12, 12, 12, 12)
+            about_text = QLabel(
+                "ToneFinish 1.0.0\n"
+                "By SABE Software\n\n"
+                "Creditos:\n"
+                "Martin Alejandro Oviedo + Ashriel\n\n"
+                "Contacto:\n"
+                "martinoviedo@disroot.orgh\n\n"
+                "Licencia:\n"
+                "Licencia de pago (posible donation ware a partir de un monto)."
+            )
+            about_text.setWordWrap(True)
+            about_layout.addWidget(about_text)
+            tab_about.setLayout(about_layout)
 
             tabs.addTab(tab_single, "Audio")
             tabs.addTab(tab_batch, "Lote")
             tabs.addTab(tab_presets, "Presets")
             tabs.addTab(tab_process, "Procesos")
             tabs.addTab(tab_results, "Resultados")
+            tabs.addTab(tab_about, "About")
             tabs.insertTab(0, tab_start, "Inicio")
             tabs.setCurrentIndex(0)
 
@@ -1256,6 +1426,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 output_format=output_format,
                 stereo_width=self.stereo_width_cb.isChecked(),
                 deesser=self.deesser_cb.isChecked(),
+                glue_enabled=self.glue_cb.isChecked(),
+                glue_threshold_db=self.glue_threshold_spin.value(),
+                glue_ratio=self.glue_ratio_spin.value(),
+                glue_attack_ms=self.glue_attack_spin.value(),
+                glue_release_ms=self.glue_release_spin.value(),
+                glue_makeup_db=self.glue_makeup_spin.value(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1297,6 +1473,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 loudness_preset=self.preset_combo.currentText(),
                 output_preset=self.output_preset_combo.currentText(),
                 deesser=self.deesser_cb.isChecked(),
+                glue_enabled=self.glue_cb.isChecked(),
+                glue_threshold_db=self.glue_threshold_spin.value(),
+                glue_ratio=self.glue_ratio_spin.value(),
+                glue_attack_ms=self.glue_attack_spin.value(),
+                glue_release_ms=self.glue_release_spin.value(),
+                glue_makeup_db=self.glue_makeup_spin.value(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1350,6 +1532,12 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 loudness_preset=self.preset_combo.currentText(),
                 output_preset=self.output_preset_combo.currentText(),
                 deesser=self.deesser_cb.isChecked(),
+                glue_enabled=self.glue_cb.isChecked(),
+                glue_threshold_db=self.glue_threshold_spin.value(),
+                glue_ratio=self.glue_ratio_spin.value(),
+                glue_attack_ms=self.glue_attack_spin.value(),
+                glue_release_ms=self.glue_release_spin.value(),
+                glue_makeup_db=self.glue_makeup_spin.value(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),

@@ -74,12 +74,38 @@ def build_multiband_filter(
     return ";".join(parts), mix_label
 
 
+def build_glue_filter(
+    threshold_db: float,
+    ratio: float,
+    attack_ms: float,
+    release_ms: float,
+    makeup_db: float,
+) -> str:
+    """Construye un filtro de compresion suave tipo glue."""
+    attack_s = max(0.001, attack_ms / 1000.0)
+    release_s = max(0.005, release_ms / 1000.0)
+    return (
+        "acompressor="
+        f"threshold={threshold_db:.2f}dB:"
+        f"ratio={ratio:.2f}:"
+        f"attack={attack_s:.3f}:"
+        f"release={release_s:.3f}:"
+        f"makeup={makeup_db:.2f}"
+    )
+
+
 def build_preprocess_chain(
     input_path: pathlib.Path,
     band_stats: Dict[str, float] | None,
     dynamic_eq: bool,
     stereo_width: bool,
     deesser: bool,
+    glue_enabled: bool = False,
+    glue_threshold_db: float = -18.0,
+    glue_ratio: float = 1.6,
+    glue_attack_ms: float = 20.0,
+    glue_release_ms: float = 120.0,
+    glue_makeup_db: float = 0.0,
     band_range_db: float = DEFAULT_BAND_RANGE_DB,
     max_adjust_db: float = DEFAULT_MAX_ADJUST_DB,
 ) -> Tuple[str, str]:
@@ -101,7 +127,20 @@ def build_preprocess_chain(
             max_adjust_db=max_adjust_db,
         )
         filter_chain = ";".join(part for part in [filter_chain, filter_chain_mb] if part)
-        return filter_chain, filter_output
+        input_label = filter_output
+
+    if glue_enabled:
+        glue_filter = build_glue_filter(
+            threshold_db=glue_threshold_db,
+            ratio=glue_ratio,
+            attack_ms=glue_attack_ms,
+            release_ms=glue_release_ms,
+            makeup_db=glue_makeup_db,
+        )
+        glue_label = "glue"
+        glue_chain = f"[{input_label}]{glue_filter}[{glue_label}]"
+        filter_chain = ";".join(part for part in [filter_chain, glue_chain] if part)
+        input_label = glue_label
 
     return filter_chain, input_label
 
@@ -119,6 +158,12 @@ def normalize_audio(
     brickwall: bool = False,
     deesser: bool = False,
     stereo_width: bool = False,
+    glue_enabled: bool = False,
+    glue_threshold_db: float = -18.0,
+    glue_ratio: float = 1.6,
+    glue_attack_ms: float = 20.0,
+    glue_release_ms: float = 120.0,
+    glue_makeup_db: float = 0.0,
     output_sr: int | None = None,
     output_bit_depth: str | None = None,
     output_format: str | None = None,
@@ -142,6 +187,12 @@ def normalize_audio(
             dynamic_eq=dynamic_eq,
             stereo_width=stereo_width,
             deesser=deesser,
+            glue_enabled=glue_enabled,
+            glue_threshold_db=glue_threshold_db,
+            glue_ratio=glue_ratio,
+            glue_attack_ms=glue_attack_ms,
+            glue_release_ms=glue_release_ms,
+            glue_makeup_db=glue_makeup_db,
             band_range_db=band_range,
             max_adjust_db=max_adjust,
         )
