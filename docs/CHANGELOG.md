@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+- Fix: version displayed dynamically in About.
+- Firma digital en TOML y presets de firma.
+- Glue compression y ajustes de procesos.
+- Tabs de resultados reorganizados y progreso global.
+
 ## 1.0.0
 - GUI completa con modo audio unico y lote.
 - Presets de loudness y de salida.

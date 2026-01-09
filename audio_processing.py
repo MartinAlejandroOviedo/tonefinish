@@ -84,13 +84,15 @@ def build_glue_filter(
     """Construye un filtro de compresion suave tipo glue."""
     attack_s = max(0.001, attack_ms / 1000.0)
     release_s = max(0.005, release_ms / 1000.0)
+    makeup_linear = 10 ** (makeup_db / 20.0)
+    makeup_linear = max(1.0, min(64.0, makeup_linear))
     return (
         "acompressor="
         f"threshold={threshold_db:.2f}dB:"
         f"ratio={ratio:.2f}:"
         f"attack={attack_s:.3f}:"
         f"release={release_s:.3f}:"
-        f"makeup={makeup_db:.2f}"
+        f"makeup={makeup_linear:.2f}"
     )
 
 

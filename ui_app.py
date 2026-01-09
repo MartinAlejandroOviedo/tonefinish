@@ -45,9 +45,12 @@ if TYPE_CHECKING:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QMessageBox,
         QPlainTextEdit,
         QProgressBar,
         QPushButton,
+        QHeaderView,
+        QStyle,
         QSizePolicy,
         QSpacerItem,
         QTabWidget,
@@ -72,9 +75,12 @@ else:
             QHBoxLayout,
             QLabel,
             QLineEdit,
+            QMessageBox,
             QPlainTextEdit,
             QProgressBar,
             QPushButton,
+            QHeaderView,
+            QStyle,
             QSizePolicy,
             QSpacerItem,
             QTabWidget,
@@ -178,7 +184,13 @@ else:
             def setAlignment(self, *args, **kwargs) -> None:
                 pass
 
+            def setIcon(self, *args, **kwargs) -> None:
+                pass
+
             def text(self) -> str:
+                return ""
+
+            def toPlainText(self) -> str:
                 return ""
 
             def addItems(self, items) -> None:
@@ -220,6 +232,9 @@ else:
             def appendPlainText(self, *args, **kwargs) -> None:
                 pass
 
+            def setPlainText(self, *args, **kwargs) -> None:
+                pass
+
             def textCursor(self) -> _TextCursorPlaceholder:
                 return _TextCursorPlaceholder()
 
@@ -251,6 +266,9 @@ else:
             def setColumnCount(self, *args, **kwargs) -> None:
                 pass
 
+            def setColumnWidth(self, *args, **kwargs) -> None:
+                pass
+
             def setHorizontalHeaderLabels(self, *args, **kwargs) -> None:
                 pass
 
@@ -263,14 +281,35 @@ else:
             def setStretchLastSection(self, *args, **kwargs) -> None:
                 pass
 
+            def setSectionResizeMode(self, *args, **kwargs) -> None:
+                pass
+
             def addTab(self, widget: object, label: str) -> None:
                 self._tabs.append((widget, label))
 
             def insertTab(self, index: int, widget: object, label: str) -> None:
                 self._tabs.insert(index, (widget, label))
 
+            def indexOf(self, widget: object) -> int:
+                for idx, (tab_widget, _label) in enumerate(self._tabs):
+                    if tab_widget is widget:
+                        return idx
+                return -1
+
             def setTabEnabled(self, index: int, enabled: bool) -> None:
                 pass
+
+            def setTabIcon(self, index: int, icon: object) -> None:
+                pass
+
+            def setTabVisible(self, index: int, visible: bool) -> None:
+                pass
+
+            def standardIcon(self, *args, **kwargs) -> object:
+                return object()
+
+            def style(self) -> "_QtWidgetPlaceholder":
+                return self
 
             def currentWidget(self) -> object | None:
                 if 0 <= self._current_index < len(self._tabs):
@@ -312,10 +351,30 @@ else:
             class AlignmentFlag:
                 AlignCenter = 0
 
-        QCheckBox = QComboBox = QDoubleSpinBox = QFileDialog = QLabel = QLineEdit = QPlainTextEdit = QProgressBar = QPushButton = QSpacerItem = QTabWidget = QTableWidget = QTableWidgetItem = _QtWidgetPlaceholder  # type: ignore
+        class QStyle:
+            class StandardPixmap:
+                SP_DesktopIcon = 0
+                SP_FileIcon = 1
+                SP_DirIcon = 2
+                SP_FileDialogDetailedView = 3
+                SP_DialogApplyButton = 4
+                SP_BrowserReload = 5
+                SP_DialogYesButton = 6
+                SP_MessageBoxInformation = 7
+                SP_MediaPlay = 8
+                SP_DirOpenIcon = 9
+                SP_FileDialogInfoView = 10
+                SP_DialogCancelButton = 11
+
+        class QHeaderView(_QtWidgetPlaceholder):
+            class ResizeMode:
+                Stretch = 0
+
+        QCheckBox = QComboBox = QDoubleSpinBox = QFileDialog = QLabel = QLineEdit = QMessageBox = QPlainTextEdit = QProgressBar = QPushButton = QSpacerItem = QTabWidget = QTableWidget = QTableWidgetItem = _QtWidgetPlaceholder  # type: ignore
         QFormLayout = QHBoxLayout = QVBoxLayout = QLayoutPlaceholder  # type: ignore
         QSvgWidget = _QtWidgetPlaceholder  # type: ignore
         Qt = _QtPlaceholder  # type: ignore
+        QHeaderView = _QtWidgetPlaceholder  # type: ignore
         PYSIDE_AVAILABLE = False
 
 
@@ -772,6 +831,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 results: list[dict] = []
                 for idx, audio_path in enumerate(files, start=1):
                     self.progress.emit(f"Procesando {idx}/{len(files)}: {audio_path.name}", idx, len(files))
+                    self.progress.emit("Analizando bandas EQ...", idx, len(files))
 
                     out_dir = self.output_dir if self.output_dir else audio_path.parent
                     output_base = out_dir / f"{audio_path.stem}{self.suffix}"
@@ -785,11 +845,13 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         verbose=self.verbose,
                         band_range_db=band_range,
                     )
+                    self.progress.emit("Analizando banda vocal...", idx, len(files))
                     voice_rms = analyze_voice_band(audio_path, verbose=self.verbose)
                     dynamic_eq = self.dynamic_eq
                     if dynamic_eq and not band_stats:
                         dynamic_eq = False
 
+                    self.progress.emit("Calibrando loudness con pre-proceso...", idx, len(files))
                     pre_chain, pre_output = build_preprocess_chain(
                         input_path=audio_path,
                         band_stats=band_stats,
@@ -817,6 +879,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     else:
                         stats, _log = analyze_audio(audio_path, self.target_lufs, self.true_peak, verbose=self.verbose)
 
+                    self.progress.emit("Procesando y normalizando audio...", idx, len(files))
                     normalize_audio(
                         input_path=audio_path,
                         output_path=output_path,
@@ -845,6 +908,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         transparent_mode=self.transparent_mode,
                     )
 
+                    self.progress.emit("Re-analizando salida...", idx, len(files))
                     post_stats, _post_log = analyze_audio(output_path, self.target_lufs, self.true_peak, verbose=False)
                     post_band_stats, _post_suggestions = analyze_eq_bands(
                         output_path,
@@ -991,7 +1055,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.glue_release_spin.setSuffix(" ms")
 
             self.glue_makeup_spin = QDoubleSpinBox()
-            self.glue_makeup_spin.setRange(-6.0, 6.0)
+            self.glue_makeup_spin.setRange(0.0, 12.0)
             self.glue_makeup_spin.setDecimals(1)
             self.glue_makeup_spin.setValue(0.0)
             self.glue_makeup_spin.setSuffix(" dB")
@@ -1029,6 +1093,11 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
             self.batch_table = QTableWidget(0, 3)
             self.batch_table.setHorizontalHeaderLabels(["Procesar", "Archivo", "Formato"])
+            self.batch_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.batch_table.setColumnWidth(0, 90)
+            self.batch_table.setColumnWidth(2, 90)
+            self.batch_table.horizontalHeader().setStretchLastSection(False)
+            self.batch_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             self.batch_select_all_btn = QPushButton("Seleccionar todo")
             self.batch_select_none_btn = QPushButton("Ninguno")
             self.batch_select_all_btn.clicked.connect(lambda: self._set_batch_selection(True))
@@ -1082,7 +1151,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.global_progress_bar.setRange(0, 1)
             self.global_progress_bar.setValue(0)
 
-            self.batch_summary_label = QLabel("-")
+            self.batch_summary_text = QPlainTextEdit()
+            self.batch_summary_text.setReadOnly(True)
+            self.batch_summary_text.setMinimumHeight(80)
 
             self._build_layout()
             self._wire_events()
@@ -1178,7 +1249,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             batch_form.addRow("Sufijo:", self.batch_suffix_edit)
             batch_layout.addLayout(batch_form)
             batch_layout.addWidget(QLabel("Archivos encontrados:"))
-            batch_layout.addWidget(self.batch_table)
+            batch_layout.addWidget(self.batch_table, 1)
             batch_select_layout = QHBoxLayout()
             batch_select_layout.addWidget(self.batch_select_all_btn)
             batch_select_layout.addWidget(self.batch_select_none_btn)
@@ -1239,6 +1310,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             results_layout.addWidget(self.single_results_container)
 
             results_tabs = QTabWidget()
+            self.results_tabs = results_tabs
 
             tab_eq = QWidget()
             tab_eq_layout = QVBoxLayout()
@@ -1271,7 +1343,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
             tab_batch_summary = QWidget()
             tab_batch_summary_layout = QVBoxLayout()
-            tab_batch_summary_layout.addWidget(self.batch_summary_label)
+            tab_batch_summary_layout.addWidget(self.batch_summary_text)
             tab_batch_summary.setLayout(tab_batch_summary_layout)
 
             tab_log = QWidget()
@@ -1284,6 +1356,11 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             results_tabs.addTab(tab_batch_results, "Resultados lote")
             results_tabs.addTab(tab_batch_summary, "Resumen lote")
             results_tabs.addTab(tab_log, "Logs")
+            self.results_tab_eq_index = results_tabs.indexOf(tab_eq)
+            self.results_tab_single_index = results_tabs.indexOf(tab_single_results)
+            self.results_tab_batch_index = results_tabs.indexOf(tab_batch_results)
+            self.results_tab_batch_summary_index = results_tabs.indexOf(tab_batch_summary)
+            self.results_tab_log_index = results_tabs.indexOf(tab_log)
             results_layout.addWidget(results_tabs)
             tab_results.setLayout(results_layout)
 
@@ -1340,7 +1417,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             about_layout.setSpacing(6)
             about_layout.setContentsMargins(12, 12, 12, 12)
             about_text = QLabel(
-                "ToneFinish 1.0.0\n"
+                f"{APP_NAME} {APP_VERSION}\n"
                 "By SABE Software\n\n"
                 "Creditos:\n"
                 "Martin Alejandro Oviedo + Ashriel\n\n"
@@ -1362,6 +1439,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             tabs.addTab(tab_about, "About")
             tabs.insertTab(0, tab_start, "Inicio")
             tabs.setCurrentIndex(0)
+            self.signature_tab_index = tabs.indexOf(tab_signature)
+            self._apply_tab_icons()
+            self._apply_button_icons()
 
             progress_layout = QHBoxLayout()
             progress_layout.addWidget(QLabel("Progreso:"))
@@ -1490,6 +1570,8 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 return
             metadata = self._collect_signature_metadata()
             if metadata is None:
+                if isinstance(getattr(self, "signature_tab_index", None), int):
+                    self.tabs.setCurrentIndex(self.signature_tab_index)
                 return
 
             worker = NormalizeWorker(
@@ -1542,6 +1624,8 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             if not self.analyze_only_cb.isChecked():
                 metadata = self._collect_signature_metadata()
                 if metadata is None:
+                    if isinstance(getattr(self, "signature_tab_index", None), int):
+                        self.tabs.setCurrentIndex(self.signature_tab_index)
                     return
 
             worker = ProcessWorker(
@@ -1596,6 +1680,8 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 return
             metadata = self._collect_signature_metadata()
             if metadata is None:
+                if isinstance(getattr(self, "signature_tab_index", None), int):
+                    self.tabs.setCurrentIndex(self.signature_tab_index)
                 return
             self._set_progress(current=0, total=len(selected_files), message="Procesando lote...")
             output_dir_text = self.batch_output_edit.text().strip()
@@ -1796,7 +1882,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
         def _update_batch_summary(self, results: list[dict]) -> None:
             if not results:
-                self.batch_summary_label.setText("-")
+                self.batch_summary_text.setPlainText("Sin datos de lote.")
                 return
             def avg(values: list[float]) -> float:
                 return sum(values) / len(values) if values else 0.0
@@ -1822,14 +1908,24 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 f"TP {avg(before_tp):.2f} -> {avg(after_tp):.2f} dBTP | "
                 f"LRA {avg(before_lra):.2f} -> {avg(after_lra):.2f} LU"
             )
-            self.batch_summary_label.setText(summary)
+            self.batch_summary_text.setPlainText(summary)
 
         def _show_single_results(self) -> None:
             self.single_results_container.setVisible(True)
+            try:
+                current_text = self.eq_suggestions.toPlainText().strip()
+            except Exception:
+                current_text = ""
+            if current_text == "Sugerencias EQ solo disponibles en audio unico.":
+                self.eq_suggestions.setPlainText("")
+            self._set_results_tabs_visibility(single=True)
 
         def _show_batch_results(self) -> None:
             self._clear_single_results()
             self.single_results_container.setVisible(False)
+            self.eq_suggestions.setPlainText("Sugerencias EQ solo disponibles en audio unico.")
+            self._set_single_results_placeholder("Resultados Antes/Despues solo disponibles en audio unico.")
+            self._set_results_tabs_visibility(single=False)
 
         def _clear_single_results(self) -> None:
             self.input_i_label.setText("-")
@@ -1842,6 +1938,78 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 label_widget.setText("-")
             self.eq_suggestions.setPlainText("")
             self.results_table.setRowCount(0)
+
+        def _set_single_results_placeholder(self, message: str) -> None:
+            self.results_table.setRowCount(1)
+            self.results_table.setItem(0, 0, QTableWidgetItem(message))
+            self.results_table.setItem(0, 1, QTableWidgetItem("-"))
+            self.results_table.setItem(0, 2, QTableWidgetItem("-"))
+
+        def _set_results_tabs_visibility(self, single: bool) -> None:
+            if not hasattr(self, "results_tabs"):
+                return
+            def set_visible(index: int, visible: bool) -> None:
+                try:
+                    self.results_tabs.setTabVisible(index, visible)
+                except Exception:
+                    self.results_tabs.setTabEnabled(index, visible)
+            if single:
+                set_visible(self.results_tab_eq_index, True)
+                set_visible(self.results_tab_single_index, True)
+                set_visible(self.results_tab_batch_index, False)
+                set_visible(self.results_tab_batch_summary_index, False)
+                set_visible(self.results_tab_log_index, True)
+            else:
+                set_visible(self.results_tab_eq_index, False)
+                set_visible(self.results_tab_single_index, False)
+                set_visible(self.results_tab_batch_index, True)
+                set_visible(self.results_tab_batch_summary_index, True)
+                set_visible(self.results_tab_log_index, True)
+
+        def _apply_tab_icons(self) -> None:
+            try:
+                style = self.style()
+            except Exception:
+                return
+            if not hasattr(style, "standardIcon"):
+                return
+            icon = style.standardIcon
+            self.tabs.setTabIcon(0, icon(QStyle.StandardPixmap.SP_DesktopIcon))
+            self.tabs.setTabIcon(1, icon(QStyle.StandardPixmap.SP_FileIcon))
+            self.tabs.setTabIcon(2, icon(QStyle.StandardPixmap.SP_DirIcon))
+            self.tabs.setTabIcon(3, icon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            self.tabs.setTabIcon(4, icon(QStyle.StandardPixmap.SP_DialogApplyButton))
+            self.tabs.setTabIcon(5, icon(QStyle.StandardPixmap.SP_BrowserReload))
+            self.tabs.setTabIcon(6, icon(QStyle.StandardPixmap.SP_DialogYesButton))
+            self.tabs.setTabIcon(7, icon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+            if hasattr(self, "results_tabs"):
+                self.results_tabs.setTabIcon(0, icon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+                self.results_tabs.setTabIcon(1, icon(QStyle.StandardPixmap.SP_MediaPlay))
+                self.results_tabs.setTabIcon(2, icon(QStyle.StandardPixmap.SP_DirOpenIcon))
+                self.results_tabs.setTabIcon(3, icon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+                self.results_tabs.setTabIcon(4, icon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+
+        def _apply_button_icons(self) -> None:
+            try:
+                style = self.style()
+            except Exception:
+                return
+            if not hasattr(style, "standardIcon"):
+                return
+            icon = style.standardIcon
+            self.input_button.setIcon(icon(QStyle.StandardPixmap.SP_FileIcon))
+            self.output_button.setIcon(icon(QStyle.StandardPixmap.SP_DialogApplyButton))
+            self.batch_input_button.setIcon(icon(QStyle.StandardPixmap.SP_DirOpenIcon))
+            self.batch_output_button.setIcon(icon(QStyle.StandardPixmap.SP_DialogApplyButton))
+            self.batch_refresh_button.setIcon(icon(QStyle.StandardPixmap.SP_BrowserReload))
+            self.batch_process_btn.setIcon(icon(QStyle.StandardPixmap.SP_MediaPlay))
+            self.process_btn.setIcon(icon(QStyle.StandardPixmap.SP_MediaPlay))
+            self.batch_select_all_btn.setIcon(icon(QStyle.StandardPixmap.SP_DialogYesButton))
+            self.batch_select_none_btn.setIcon(icon(QStyle.StandardPixmap.SP_DialogCancelButton))
+            self.analyze_btn.setIcon(icon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+            self.normalize_btn.setIcon(icon(QStyle.StandardPixmap.SP_DialogApplyButton))
+            self.signature_save_btn.setIcon(icon(QStyle.StandardPixmap.SP_DialogYesButton))
+            self.signature_delete_btn.setIcon(icon(QStyle.StandardPixmap.SP_DialogCancelButton))
 
         def _set_progress(
             self,
@@ -1930,6 +2098,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 self.tabs.setTabEnabled(1, True)
                 self.tabs.setTabEnabled(2, True)
                 self.analyze_only_cb.setEnabled(True)
+                self._set_results_tabs_visibility(single=True)
                 return
             if mode == "Lote":
                 self.tabs.setTabEnabled(1, False)
@@ -1937,6 +2106,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 if allow_navigation:
                     self.tabs.setCurrentIndex(2)
                 self.analyze_only_cb.setEnabled(True)
+                self._set_results_tabs_visibility(single=False)
             elif mode == "Solo analizar":
                 self.tabs.setTabEnabled(1, True)
                 self.tabs.setTabEnabled(2, False)
@@ -1944,12 +2114,14 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     self.tabs.setCurrentIndex(1)
                 self.analyze_only_cb.setChecked(True)
                 self.analyze_only_cb.setEnabled(False)
+                self._set_results_tabs_visibility(single=True)
             else:
                 self.tabs.setTabEnabled(2, False)
                 self.tabs.setTabEnabled(1, True)
                 if allow_navigation:
                     self.tabs.setCurrentIndex(1)
                 self.analyze_only_cb.setEnabled(True)
+                self._set_results_tabs_visibility(single=True)
 
         def is_inicio_activo(self) -> bool:
             return self.tabs.currentWidget() == self.tab_start
@@ -1971,6 +2143,11 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
             if not artist or not copyright_text or not comment:
                 self._show_error("Completa Artist/Creator, Copyright y Comments en Firma Digital.")
+                QMessageBox.warning(
+                    self,
+                    "Firma digital incompleta",
+                    "Completa Artist/Creator, Copyright y Comments en la pestaña Firma Digital.",
+                )
                 return None
 
             if "<Artist>" in copyright_text:

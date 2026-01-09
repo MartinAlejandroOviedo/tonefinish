@@ -1340,7 +1340,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             about_layout.setSpacing(6)
             about_layout.setContentsMargins(12, 12, 12, 12)
             about_text = QLabel(
-                "ToneFinish 1.0.0\n"
+                f"{APP_NAME} {APP_VERSION}\n"
                 "By SABE Software\n\n"
                 "Creditos:\n"
                 "Martin Alejandro Oviedo + Ashriel\n\n"
