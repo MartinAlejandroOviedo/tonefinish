@@ -8,9 +8,11 @@ ToneFinish es una aplicacion de audio para analizar, normalizar y finalizar arch
 - Control dinamico por bandas con compand.
 - Control de stereo por bandas (graves mas cerrados, agudos mas abiertos).
 - De-esser opcional para reducir sibilancia.
+- Glue compression opcional para dar cohesión.
 - Fade in/out opcional.
 - Procesamiento por lote con tabla de resultados.
 - Reporte TOML por archivo con metrica y diagnostico.
+- Firma digital en WAV (metadata) con presets guardables.
 
 ## Flujo general
 1) Selecciona un archivo o una carpeta (lote).
@@ -24,6 +26,7 @@ Cada salida genera un reporte TOML en la carpeta `log/` dentro de la carpeta de 
 - Settings usados.
 - Metricas before/after.
 - Diagnostico y recomendaciones.
+- Firma digital aplicada.
 
 ## Requisitos
 - Debian Trixie o similar.
@@ -40,4 +43,3 @@ El paquete crea un entorno virtual en `/usr/lib/tonefinish/.venv` e instala depe
 
 ## Notas de calidad
 El diagnostico "Necesita trabajo" es tecnico: indica que la salida no cumple con el objetivo de LUFS, true-peak o dinamica.
-

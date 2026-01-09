@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2
+- Firma digital con metadata en WAV y presets guardados.
+- Tab Firma Digital + validacion obligatoria.
+- Glue compression controlable en Procesos.
+- Resultados reorganizados en sub-tabs con iconos.
+- Progreso global y logs detallados en lote.
+
 ## 1.0.1
 - Fix: version displayed dynamically in About.
 - Firma digital en TOML y presets de firma.
