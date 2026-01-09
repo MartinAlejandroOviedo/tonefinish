@@ -1,0 +1,8 @@
+Package: tonefinish
+Version: 0.1.0
+Section: sound
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.9), python3-pyside6, ffmpeg
+Maintainer: Martin <martin@local>
+Description: Audio finisher con analisis y normalizacion

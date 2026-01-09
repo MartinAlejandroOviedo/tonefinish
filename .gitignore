@@ -1,0 +1,13 @@
+# Entorno y caches
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Archivos temporales/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Artefactos de audio de prueba
+*.wav
