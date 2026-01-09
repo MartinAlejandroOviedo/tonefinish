@@ -40,6 +40,18 @@ install -m 0644 "${script_dir}/deb/tonefinish.desktop" \
 install -m 0644 "${root_dir}/assets/tonefinish.svg" \
   "${pkg_dir}/usr/share/icons/hicolor/scalable/apps/tonefinish.svg"
 
+icon_sizes=(16 32 48 64 128 256 512)
+svg_src="${root_dir}/assets/tonefinish.svg"
+for size in "${icon_sizes[@]}"; do
+  out_dir="${pkg_dir}/usr/share/icons/hicolor/${size}x${size}/apps"
+  mkdir -p "${out_dir}"
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    rsvg-convert -w "${size}" -h "${size}" "${svg_src}" -o "${out_dir}/tonefinish.png"
+  elif command -v convert >/dev/null 2>&1; then
+    convert "${svg_src}" -resize "${size}x${size}" "${out_dir}/tonefinish.png"
+  fi
+done
+
 cat > "${pkg_dir}/DEBIAN/postinst" <<'EOF'
 #!/usr/bin/env bash
 set -e

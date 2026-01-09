@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.3
+- Noise/Repair: noise reduction, de-clip, de-click/pop con Auto/Leve/Medio/Alto.
+- Auto completo para repair basado en analisis.
+- Mejoras de UI: ocultar sub-tabs segun modo y iconos en tabs/botones.
+
 ## 1.0.2
 - Firma digital con metadata en WAV y presets guardados.
 - Tab Firma Digital + validacion obligatoria.

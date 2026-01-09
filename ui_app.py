@@ -13,7 +13,7 @@ from audio_analysis import (
     format_analysis_summary,
     write_analysis_toml,
 )
-from audio_processing import build_preprocess_chain, ensure_output_path, normalize_audio
+from audio_processing import build_preprocess_chain, ensure_output_path, normalize_audio, resolve_repair_levels
 from audio_tools import ensure_ffmpeg_available
 from config import (
     APP_NAME,
@@ -444,6 +444,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
+            noise_reduction_level: str,
+            declip_level: str,
+            declick_level: str,
         ) -> None:
             super().__init__()
             self.input_path = input_path
@@ -471,10 +474,16 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
+            self.noise_reduction_level = noise_reduction_level
+            self.declip_level = declip_level
+            self.declick_level = declick_level
 
         def run(self) -> None:
             try:
                 ensure_ffmpeg_available()
+                noise_level, declip_level, declick_level = resolve_repair_levels(
+                    self.stats, self.noise_reduction_level, self.declip_level, self.declick_level
+                )
                 log = normalize_audio(
                     input_path=self.input_path,
                     output_path=self.output_path,
@@ -498,6 +507,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     glue_release_ms=self.glue_release_ms,
                     glue_makeup_db=self.glue_makeup_db,
                     metadata=self.metadata,
+                    noise_reduction_level=noise_level,
+                    declip_level=declip_level,
+                    declick_level=declick_level,
                     fade_in=self.fade_in,
                     fade_out=self.fade_out,
                     transparent_mode=self.transparent_mode,
@@ -539,6 +551,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
+            noise_reduction_level: str,
+            declip_level: str,
+            declick_level: str,
         ) -> None:
             super().__init__()
             self.input_path = input_path
@@ -567,6 +582,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
+            self.noise_reduction_level = noise_reduction_level
+            self.declip_level = declip_level
+            self.declick_level = declick_level
 
         def run(self) -> None:
             try:
@@ -589,6 +607,10 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         "Aviso: no se pudo calcular RMS por bandas; "
                         "se desactiva el control dinámico por bandas.\n"
                     )
+                raw_stats, _raw_log = analyze_audio(self.input_path, self.target_lufs, self.true_peak, verbose=False)
+                noise_level, declip_level, declick_level = resolve_repair_levels(
+                    raw_stats, self.noise_reduction_level, self.declip_level, self.declick_level
+                )
                 self.progress.emit("Calibrando loudness con pre-proceso...")
                 pre_chain, pre_output = build_preprocess_chain(
                     input_path=self.input_path,
@@ -596,6 +618,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                     dynamic_eq=dynamic_eq,
                     stereo_width=self.stereo_width,
                     deesser=self.deesser,
+                    noise_reduction_level=noise_level,
+                    declip_level=declip_level,
+                    declick_level=declick_level,
                     glue_enabled=self.glue_enabled,
                     glue_threshold_db=self.glue_threshold_db,
                     glue_ratio=self.glue_ratio,
@@ -653,6 +678,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         glue_release_ms=self.glue_release_ms,
                         glue_makeup_db=self.glue_makeup_db,
                         metadata=self.metadata,
+                        noise_reduction_level=noise_level,
+                        declip_level=declip_level,
+                        declick_level=declick_level,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -790,6 +818,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             fade_in: float,
             fade_out: float,
             transparent_mode: bool,
+            noise_reduction_level: str,
+            declip_level: str,
+            declick_level: str,
         ) -> None:
             super().__init__()
             self.files = files
@@ -818,6 +849,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.fade_in = fade_in
             self.fade_out = fade_out
             self.transparent_mode = transparent_mode
+            self.noise_reduction_level = noise_reduction_level
+            self.declip_level = declip_level
+            self.declick_level = declick_level
 
         def run(self) -> None:
             try:
@@ -840,6 +874,15 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
 
                     band_range = TRANSPARENT_BAND_RANGE_DB if self.transparent_mode else DEFAULT_BAND_RANGE_DB
                     max_adjust = TRANSPARENT_MAX_ADJUST_DB if self.transparent_mode else DEFAULT_MAX_ADJUST_DB
+                    raw_stats, _raw_log = analyze_audio(
+                        audio_path,
+                        self.target_lufs,
+                        self.true_peak,
+                        verbose=False,
+                    )
+                    noise_level, declip_level, declick_level = resolve_repair_levels(
+                        raw_stats, self.noise_reduction_level, self.declip_level, self.declick_level
+                    )
                     band_stats, _suggestions = analyze_eq_bands(
                         audio_path,
                         verbose=self.verbose,
@@ -858,6 +901,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         dynamic_eq=dynamic_eq,
                         stereo_width=self.stereo_width,
                         deesser=self.deesser,
+                        noise_reduction_level=noise_level,
+                        declip_level=declip_level,
+                        declick_level=declick_level,
                         glue_enabled=self.glue_enabled,
                         glue_threshold_db=self.glue_threshold_db,
                         glue_ratio=self.glue_ratio,
@@ -903,6 +949,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                         glue_release_ms=self.glue_release_ms,
                         glue_makeup_db=self.glue_makeup_db,
                         metadata=self.metadata,
+                        noise_reduction_level=noise_level,
+                        declip_level=declip_level,
+                        declick_level=declick_level,
                         fade_in=self.fade_in,
                         fade_out=self.fade_out,
                         transparent_mode=self.transparent_mode,
@@ -1030,6 +1079,21 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.fade_out_spin.setDecimals(2)
             self.fade_out_spin.setValue(0.0)
             self.fade_out_spin.setSuffix(" s")
+
+            self.noise_reduction_combo = QComboBox()
+            self.noise_reduction_combo.addItems(["Off", "Auto", "Leve", "Medio", "Alto"])
+            self.noise_reduction_combo.setCurrentIndex(1)
+
+            self.declip_combo = QComboBox()
+            self.declip_combo.addItems(["Off", "Auto", "Leve", "Medio", "Alto"])
+            self.declip_combo.setCurrentIndex(1)
+
+            self.declick_combo = QComboBox()
+            self.declick_combo.addItems(["Off", "Auto", "Leve", "Medio", "Alto"])
+            self.declick_combo.setCurrentIndex(1)
+
+            self.auto_repair_cb = QCheckBox("Auto completo (Noise/Clip/Pop)")
+            self.auto_repair_cb.setChecked(False)
 
             self.glue_threshold_spin = QDoubleSpinBox()
             self.glue_threshold_spin.setRange(-60.0, 0.0)
@@ -1265,6 +1329,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             settings_form.addRow("Bit depth:", self.bit_depth_combo)
             settings_form.addRow("Fade in:", self.fade_in_spin)
             settings_form.addRow("Fade out:", self.fade_out_spin)
+            settings_form.addRow("Noise reduction:", self.noise_reduction_combo)
+            settings_form.addRow("De-clip:", self.declip_combo)
+            settings_form.addRow("De-click/pop:", self.declick_combo)
             settings_form.addRow("Glue threshold:", self.glue_threshold_spin)
             settings_form.addRow("Glue ratio:", self.glue_ratio_spin)
             settings_form.addRow("Glue attack:", self.glue_attack_spin)
@@ -1282,6 +1349,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             options_layout.addWidget(self.deesser_cb)
             options_layout.addWidget(self.transparent_cb)
             options_layout.addWidget(self.glue_cb)
+            options_layout.addWidget(self.auto_repair_cb)
             process_layout.addLayout(options_layout)
             tab_process.setLayout(process_layout)
 
@@ -1461,6 +1529,7 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             self.output_preset_combo.currentIndexChanged.connect(self._apply_output_preset)
             self.output_format_combo.currentIndexChanged.connect(self._apply_output_format)
             self.mode_combo.currentIndexChanged.connect(lambda: self._on_mode_changed(allow_navigation=True))
+            self.auto_repair_cb.stateChanged.connect(self._on_auto_repair_toggled)
             self.signature_save_btn.clicked.connect(self._save_signature_preset)
             self.signature_delete_btn.clicked.connect(self._delete_signature_preset)
             self.signature_preset_combo.currentIndexChanged.connect(self._load_signature_preset)
@@ -1597,6 +1666,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
                 metadata=metadata,
+                noise_reduction_level=self.noise_reduction_combo.currentText(),
+                declip_level=self.declip_combo.currentText(),
+                declick_level=self.declick_combo.currentText(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1652,6 +1724,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
                 metadata=metadata,
+                noise_reduction_level=self.noise_reduction_combo.currentText(),
+                declip_level=self.declip_combo.currentText(),
+                declick_level=self.declick_combo.currentText(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -1717,6 +1792,9 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
                 glue_release_ms=self.glue_release_spin.value(),
                 glue_makeup_db=self.glue_makeup_spin.value(),
                 metadata=metadata,
+                noise_reduction_level=self.noise_reduction_combo.currentText(),
+                declip_level=self.declip_combo.currentText(),
+                declick_level=self.declick_combo.currentText(),
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 transparent_mode=self.transparent_cb.isChecked(),
@@ -2298,6 +2376,16 @@ if PYSIDE_AVAILABLE or TYPE_CHECKING:
             else:
                 if self.output_preset_combo.currentText() == "Manual":
                     self.bit_depth_combo.setEnabled(True)
+
+        def _on_auto_repair_toggled(self, state: int | bool) -> None:
+            enabled = bool(state)
+            if enabled:
+                self.noise_reduction_combo.setCurrentText("Auto")
+                self.declip_combo.setCurrentText("Auto")
+                self.declick_combo.setCurrentText("Auto")
+            self.noise_reduction_combo.setEnabled(not enabled)
+            self.declip_combo.setEnabled(not enabled)
+            self.declick_combo.setEnabled(not enabled)
 
         def _get_output_format(self) -> str | None:
             text = self.output_format_combo.currentText()

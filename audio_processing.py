@@ -96,12 +96,94 @@ def build_glue_filter(
     )
 
 
+def _level_key(level: str) -> str:
+    return level.strip().lower()
+
+
+def resolve_repair_levels(
+    stats: Dict[str, float] | None,
+    noise_level: str,
+    declip_level: str,
+    declick_level: str,
+) -> Tuple[str, str, str]:
+    """Resuelve niveles Auto a niveles concretos según el análisis."""
+    if stats is None:
+        return noise_level, declip_level, declick_level
+
+    input_tp = stats.get("input_tp", 0.0)
+    input_thresh = stats.get("input_thresh", -50.0)
+
+    def resolve_noise(level: str) -> str:
+        if _level_key(level) != "auto":
+            return level
+        return "Leve" if input_thresh > -35.0 else "Off"
+
+    def resolve_declip(level: str) -> str:
+        if _level_key(level) != "auto":
+            return level
+        return "Leve" if input_tp >= -0.3 else "Off"
+
+    def resolve_declick(level: str) -> str:
+        if _level_key(level) != "auto":
+            return level
+        return "Leve" if input_tp >= -0.2 else "Off"
+
+    return resolve_noise(noise_level), resolve_declip(declip_level), resolve_declick(declick_level)
+
+
+def build_repair_chain(
+    input_label: str,
+    noise_level: str,
+    declip_level: str,
+    declick_level: str,
+) -> Tuple[str, str]:
+    """Construye filtros de repair (noise/clip/click) antes del resto."""
+    parts = []
+    current = input_label
+
+    def add_filter(filter_expr: str, label: str) -> None:
+        nonlocal current
+        parts.append(f"[{current}]{filter_expr}[{label}]")
+        current = label
+
+    level = _level_key(declip_level)
+    if level not in ("off", "apagado"):
+        add_filter("adeclip", "dc")
+
+    level = _level_key(declick_level)
+    if level not in ("off", "apagado"):
+        if level == "leve":
+            add_filter("adeclick=a=0.20", "dk")
+        elif level == "medio":
+            add_filter("adeclick=a=0.40", "dk")
+        elif level == "alto":
+            add_filter("adeclick=a=0.60", "dk")
+        else:
+            add_filter("adeclick", "dk")
+
+    level = _level_key(noise_level)
+    if level not in ("off", "apagado"):
+        if level == "leve":
+            add_filter("afftdn=nr=6:nf=-30", "nr")
+        elif level == "medio":
+            add_filter("afftdn=nr=12:nf=-35", "nr")
+        elif level == "alto":
+            add_filter("afftdn=18:nf=-40", "nr")
+        else:
+            add_filter("afftdn=nr=6:nf=-30", "nr")
+
+    return ";".join(parts), current
+
+
 def build_preprocess_chain(
     input_path: pathlib.Path,
     band_stats: Dict[str, float] | None,
     dynamic_eq: bool,
     stereo_width: bool,
     deesser: bool,
+    noise_reduction_level: str = "Off",
+    declip_level: str = "Off",
+    declick_level: str = "Off",
     glue_enabled: bool = False,
     glue_threshold_db: float = -18.0,
     glue_ratio: float = 1.6,
@@ -114,9 +196,20 @@ def build_preprocess_chain(
     """Construye el pre-proceso antes de loudnorm/limiter."""
     filter_chain = ""
     input_label = "0:a"
+    repair_chain, repair_output = build_repair_chain(
+        input_label=input_label,
+        noise_level=noise_reduction_level,
+        declip_level=declip_level,
+        declick_level=declick_level,
+    )
+    if repair_chain:
+        filter_chain = repair_chain
+        input_label = repair_output
+
     if deesser:
         deesser_filter = build_deesser_filter(input_path)
-        filter_chain = f"[0:a]{deesser_filter}[des]"
+        deesser_chain = f"[{input_label}]{deesser_filter}[des]"
+        filter_chain = ";".join(part for part in [filter_chain, deesser_chain] if part)
         input_label = "des"
 
     if dynamic_eq or stereo_width:
@@ -160,6 +253,9 @@ def normalize_audio(
     brickwall: bool = False,
     deesser: bool = False,
     stereo_width: bool = False,
+    noise_reduction_level: str = "Off",
+    declip_level: str = "Off",
+    declick_level: str = "Off",
     glue_enabled: bool = False,
     glue_threshold_db: float = -18.0,
     glue_ratio: float = 1.6,
@@ -190,6 +286,9 @@ def normalize_audio(
             dynamic_eq=dynamic_eq,
             stereo_width=stereo_width,
             deesser=deesser,
+            noise_reduction_level=noise_reduction_level,
+            declip_level=declip_level,
+            declick_level=declick_level,
             glue_enabled=glue_enabled,
             glue_threshold_db=glue_threshold_db,
             glue_ratio=glue_ratio,
