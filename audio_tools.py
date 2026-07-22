@@ -83,6 +83,19 @@ def _fallback_ffmpeg_bin() -> str | None:
     return None
 
 
+def _binary_stdout_ffmpeg_bin() -> str:
+    """Usa FFmpeg real cuando la salida de audio debe viajar por stdout.
+
+    El wrapper experimental ``ffmpeg-spasm`` interpreta ``-ar`` como una
+    operación a archivo. Con una salida ``-`` puede confundir la entrada con
+    la salida y truncar el audio fuente. Las lecturas binarias no necesitan
+    ese wrapper y deben ejecutarse con FFmpeg real.
+    """
+    if os.path.basename(_FFMPEG_BIN) == "ffmpeg-spasm":
+        return _fallback_ffmpeg_bin() or _FFMPEG_BIN
+    return _FFMPEG_BIN
+
+
 def _is_spasm_executor_error(stderr: str) -> bool:
     text = (stderr or "").lower()
     return (
@@ -618,7 +631,7 @@ def get_waveform_samples(
     """Devuelve muestras de amplitud y el sample rate efectivo para dibujar la forma de onda."""
     preview_seconds = max(5, int(os.getenv("TONEFINISH_WAVEFORM_PREVIEW_SECONDS", str(max_seconds))))
     cmd = [
-        _FFMPEG_BIN,
+        _binary_stdout_ffmpeg_bin(),
         "-v",
         "error",
         "-nostdin",
@@ -666,7 +679,7 @@ def get_audio_mono_samples(
 ) -> list[float] | None:
     """Devuelve muestras mono en float32 para análisis espectral."""
     cmd = [
-        _FFMPEG_BIN,
+        _binary_stdout_ffmpeg_bin(),
         "-v",
         "error",
         "-nostdin",

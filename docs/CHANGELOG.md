@@ -10,6 +10,7 @@
 - **VALIDADO:** 91 pruebas correctas; dos pruebas espectrales se omiten solamente cuando NumPy no está instalado en el intérprete activo.
 
 ### 📦 Proyecto y empaquetado
+- **FIX CRÍTICO:** El análisis binario MTS/forma de onda evita `ffmpeg-spasm` y usa FFmpeg real; impide que el wrapper confunda entrada/salida con `-ar` y trunque el master a 0 bytes.
 - **FIX:** Dependencias DEB de SpASM alineadas con las versiones publicadas (`spasm >= 0.2.3` y skill FFmpeg `>= 0.2.3~exp1`), evitando un conflicto imposible durante la instalación.
 - **MEJORADO:** Dependencias aisladas por proyecto mediante `.venv` y `requirements-lock.txt`.
 - **LIMPIEZA:** Eliminados cachés, builds, logs, wheels, audios temporales y releases históricos del árbol del proyecto.
