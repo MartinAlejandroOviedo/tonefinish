@@ -8,6 +8,9 @@ from typing import Iterable, Mapping, Sequence
 from processes import registry as process_registry
 from processes.catalog import function_registry
 from processes.contracts import AudioFunctionAction, AudioProcessContext, FilterLabelFactory
+from processes.budgets import (
+    DEFAULT_BUDGET_POLICY, HEADROOM_GOVERNOR_ID, estimate_effective_band_boosts,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,18 @@ class AudioProcessOrchestrator:
         input_label: str = "0:a",
     ) -> CompiledAudioGraph:
         validated = function_registry.validate_plan(actions)
+        headroom = estimate_effective_band_boosts(validated)
+        limit = float(DEFAULT_BUDGET_POLICY["effective_band_boost_max_db"])
+        exceeded = {
+            band: value for band, value in headroom["effective_boost_by_band_db"].items()
+            if value > limit + 1e-9
+        }
+        if exceeded:
+            details = ", ".join(f"{band}={value:.2f}dB" for band, value in exceeded.items())
+            raise ValueError(
+                f"{HEADROOM_GOVERNOR_ID}: boost efectivo acumulado excedido "
+                f"(límite={limit:.2f}dB; {details})"
+            )
         labels = FilterLabelFactory()
         parts: list[str] = []
         current = input_label

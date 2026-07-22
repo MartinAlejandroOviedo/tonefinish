@@ -1374,12 +1374,6 @@ if PYSIDE_AVAILABLE:
             layout = QVBoxLayout()
 
             header_layout = QHBoxLayout()
-            header_title = QLabel(f"{APP_NAME} {APP_VERSION}")
-            header_title.setStyleSheet("QLabel { font-size: 16px; font-weight: bold; }")
-            header_subtitle = QLabel("Asistencia técnica y refinamiento: Nico")
-            header_subtitle.setStyleSheet("QLabel { color: #ffffff; }")
-            header_layout.addWidget(header_title)
-            header_layout.addWidget(header_subtitle)
             header_layout.addStretch(1)
             header_layout.addWidget(self.window_toggle_btn)
             layout.addLayout(header_layout)

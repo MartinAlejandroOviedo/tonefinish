@@ -1,3 +1,26 @@
+## 4.2.2 (2026-07-22)
+
+### 🛡️ Control acumulado de señal
+- **NUEVO:** Gobernador `audio.governor.chain_headroom` obligatorio antes de compilar el grafo DSP.
+- **NUEVO:** Estimación conservadora del peor boost simultáneo para `sub_bass`, `bass`, `low_mid`, `mid`, `high_mid` y `air`.
+- **MEJORADO:** Se contabilizan EQ, dinámica ascendente, makeup, saturación, exciter, naturalizador vocal y expansión estéreo entre plugins distintos.
+- **PROTECCIÓN:** Los cortes no descuentan el riesgo de boosts porque pueden actuar en tiempos o regiones diferentes.
+- **PROTECCIÓN:** Rechazo preventivo cuando una banda supera `+2,5 dB`; no se delega el problema al limitador final.
+- **AUDITORÍA:** `decision_trace.budget_report.headroom_report` registra boost por banda, peor banda y contribuciones por `function_id`.
+- **VALIDADO:** 91 pruebas correctas; dos pruebas espectrales se omiten solamente cuando NumPy no está instalado en el intérprete activo.
+
+### 📦 Proyecto y empaquetado
+- **FIX:** Dependencias DEB de SpASM alineadas con las versiones publicadas (`spasm >= 0.2.3` y skill FFmpeg `>= 0.2.3~exp1`), evitando un conflicto imposible durante la instalación.
+- **MEJORADO:** Dependencias aisladas por proyecto mediante `.venv` y `requirements-lock.txt`.
+- **LIMPIEZA:** Eliminados cachés, builds, logs, wheels, audios temporales y releases históricos del árbol del proyecto.
+- **FIX:** `.gitignore` excluye artefactos Flatpak/RPM/DEB y conserva los scripts fuente de empaquetado.
+- **FIX:** RPM sincroniza automáticamente su versión, usa arquitectura `x86_64` e incluye módulos SpASM actuales.
+- **FIX:** Flatpak incluye todos los módulos, usa wheels CPython 3.11 y ejecuta `/usr/bin/python3`.
+- **ACTUALIZADO:** Paquetes DEB, RPM y Flatpak versión `4.2.2`.
+- **FIX:** Eliminado un crédito personal no identificado de la cabecera, pantalla informativa y README.
+- **UI:** Eliminado el título duplicado de la cabecera; la identificación queda en la barra de ventana y portada.
+- **CRÉDITOS:** Identificación técnica actualizada a `Codex (OpenAI)`.
+
 ## 4.2.1 (2026-07-21)
 
 ### 🧠 Auto-Master IA

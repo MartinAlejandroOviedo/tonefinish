@@ -35,6 +35,17 @@ class AudioProcessOrchestratorTests(unittest.TestCase):
         self.assertEqual(graph.output_label, "autogain_final_peak_out_1")
         self.assertNotIn("[0:a]volume=-3", graph.filter_chain)
 
+    def test_orchestrator_rejects_cross_plugin_band_headroom_overflow(self):
+        actions = [
+            AudioFunctionAction("audio.multiband.eq", target="mid", params={"gain_db": 1.5}),
+            AudioFunctionAction("audio.transient.dynamic_control", params={
+                "amount_db": 1.2, "threshold_db": -18.0,
+                "attack_ms": 10.0, "release_ms": 120.0,
+            }),
+        ]
+        with self.assertRaisesRegex(ValueError, "audio.governor.chain_headroom"):
+            orchestrator.compile(actions, AudioProcessContext("track", 48000, 2))
+
     def test_consecutive_multiband_actions_share_one_crossover(self):
         actions = [
             AudioFunctionAction("audio.multiband.eq", target="bass", params={"gain_db": -1.0}),

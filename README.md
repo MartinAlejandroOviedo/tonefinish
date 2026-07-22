@@ -4,7 +4,20 @@
 
 ToneFinish es una aplicación de audio para analizar, normalizar y finalizar pistas mediante DeepSeek, el runtime SpASM y su skill FFmpeg.
 
-## ⚡ Novedades v4.2.1
+## ⚡ Novedades v4.2.2
+
+### 🛡️ Headroom acumulado por banda
+- ✅ El gobernador `audio.governor.chain_headroom` calcula el peor aumento efectivo en cada una de las seis bandas.
+- ✅ Suma EQ, EQ dinámica, makeup, saturación, exciter, transientes, procesamiento vocal y ancho estéreo aunque pertenezcan a plugins distintos.
+- ✅ Los cortes no ocultan realces dinámicos que pueden actuar en otro instante o frecuencia.
+- ✅ La cadena se rechaza antes de FFmpeg cuando una banda supera el margen conservador de `+2,5 dB`.
+- ✅ El cálculo queda registrado en `decision_trace.budget_report.headroom_report` con contribuciones por `function_id`.
+
+### 🧹 Proyecto y distribución
+- ✅ Dependencias Python aisladas en `.venv` por proyecto y reproducibles mediante `requirements-lock.txt`.
+- ✅ Cachés, builds, logs, wheels y paquetes generados quedan fuera del historial Git.
+- ✅ RPM y Flatpak incluyen todos los módulos actuales, SpASM y el catálogo canónico sin incluir pruebas.
+- ✅ RPM `x86_64` por los binarios nativos SpASM y Flatpak fijado al Python 3.11 del runtime KDE 6.7.
 
 ### 🧠 Auto-Master canónico y auditable
 - ✅ DeepSeek decide la cadena por tema usando IDs estables de funciones de audio.
@@ -92,18 +105,32 @@ ToneFinish es una aplicación de audio para analizar, normalizar y finalizar pis
 - Pestaña Ondas con forma de onda interactiva y fades por archivo
 
 ## Créditos
-- Desarrollo y dirección técnica: Martín Alejandro Oviedo + Ashriel
-- Asistencia técnica y refinamiento: Nico
+- Dirección y desarrollo: Martín Alejandro Oviedo
+- Asistencia técnica: Codex (OpenAI)
 
 ## Instalación (Debian)
 ```bash
 ./packaging/build_deb.sh
-sudo apt install ./releases/tonefinish_4.2.1.deb
+sudo apt install ./releases/tonefinish_4.2.2.deb
 # o usar el enlace estable:
 sudo apt install ./releases/tonefinish_latest.deb
 ```
 
-El paquete requiere `spasm >= 0.2.10` y `spasm-skill-ffmpeg-subset >= 0.2.10`.
+El paquete Debian requiere `spasm >= 0.2.3` y `spasm-skill-ffmpeg-subset >= 0.2.3~exp1`, versiones compatibles con los paquetes actualmente publicados.
+
+## Entorno Python aislado
+Cada clon debe crear sus propias dependencias dentro del proyecto:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-lock.txt
+python -m unittest discover
+python main.py
+```
+
+Para volver a abrir ToneFinish: `source .venv/bin/activate`. Para salir del entorno: `deactivate`.
 
 ## Documentación
 - `docs/README.md` - Documentación general

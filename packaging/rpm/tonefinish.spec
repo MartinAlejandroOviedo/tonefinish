@@ -1,12 +1,12 @@
 Name:           tonefinish
-Version:        4.2.1
+Version:        4.2.2
 Release:        1%{?dist}
 Summary:        Audio finisher con analisis y normalizacion (ToneFinish)
 
 License:        Proprietary
 URL:            https://github.com/MartinAlejandroOviedo/tonefinish
 BuildArch:      x86_64
-Requires:       python3, ffmpeg, spasm >= 0.2.10, spasm-skill-ffmpeg-subset >= 0.2.10
+Requires:       python3, ffmpeg, spasm >= 0.2.3, spasm-skill-ffmpeg-subset >= 0.2.3
 Source0:        %{name}-%{version}.tar.gz
 
 %description

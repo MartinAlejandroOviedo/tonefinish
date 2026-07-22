@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .contracts import AudioFunctionAction
+from .contracts import AudioFunctionAction, BAND_IDS
 
 
 TONAL_GOVERNOR_ID = "audio.governor.tonal_budget"
 GAIN_GOVERNOR_ID = "audio.governor.gain_budget"
 OVERLAP_GOVERNOR_ID = "audio.governor.spectral_overlap"
+HEADROOM_GOVERNOR_ID = "audio.governor.chain_headroom"
 
 DEFAULT_BUDGET_POLICY = {
     "tonal_boost_individual_max_db": 2.0,
@@ -20,6 +21,7 @@ DEFAULT_BUDGET_POLICY = {
     "gain_cut_individual_max_db": 3.0,
     "gain_boost_total_max_db": 3.0,
     "gain_cut_total_max_db": 6.0,
+    "effective_band_boost_max_db": 2.5,
 }
 
 _TONAL_PARAM = {
@@ -48,6 +50,92 @@ def _evidence_positive(action: AudioFunctionAction, key: str) -> bool:
         return float(action.evidence.get(key, 0.0)) > 0.0
     except (TypeError, ValueError):
         return False
+
+
+def _positive(value: Any) -> float:
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def estimate_effective_band_boosts(
+    actions: Sequence[AudioFunctionAction],
+) -> dict[str, Any]:
+    """Estima el peor boost simultáneo de la cadena en cada banda.
+
+    Los cortes no compensan boosts: un proceso dinámico puede no actuar en el
+    mismo instante y dos filtros cercanos pueden solaparse parcialmente.
+    """
+    totals = {band: 0.0 for band in BAND_IDS}
+    contributions: list[dict[str, Any]] = []
+
+    def add(index: int, action: AudioFunctionAction, bands: Sequence[str], value: float, source: str) -> None:
+        value = _positive(value)
+        if value <= 1e-9:
+            return
+        valid_bands = tuple(band for band in bands if band in totals)
+        for band in valid_bands:
+            totals[band] += value
+        contributions.append({
+            "index": index, "function_id": action.function_id,
+            "target": action.target, "bands": list(valid_bands),
+            "estimated_boost_db": round(value, 3), "source": source,
+        })
+
+    all_bands = tuple(BAND_IDS)
+    for index, action in enumerate(actions):
+        if not action.enabled:
+            continue
+        fid, p = action.function_id, action.params
+        target = (action.target,) if action.target in totals else all_bands
+
+        if fid in {"audio.tone_eq.band", "audio.multiband.eq", "audio.dynamic_eq.motion",
+                   "audio.low_end.dynamic_balance"}:
+            add(index, action, target, p.get("gain_db", 0.0), "signed_gain")
+        elif fid == "audio.tone_eq.tilt":
+            gain = float(p.get("gain_db", 0.0))
+            add(index, action, ("high_mid", "air") if gain > 0 else ("sub_bass", "bass"),
+                abs(gain) / 2.0, "tilt_shelf")
+        elif fid == "audio.spectral.dullness_recovery":
+            add(index, action, ("high_mid", "air"), p.get("max_boost_db", 0.0), "dynamic_spectral")
+        elif fid == "audio.transient.dynamic_control":
+            add(index, action, target, p.get("amount_db", 0.0), "upward_dynamics")
+        elif fid in {"audio.autogain.output_gain", "audio.glue.bus_compressor"}:
+            key = "gain_db" if fid == "audio.autogain.output_gain" else "makeup_db"
+            add(index, action, all_bands, p.get(key, 0.0), "global_gain")
+        elif fid == "audio.multiband.compressor":
+            add(index, action, target, p.get("makeup_db", 0.0), "band_makeup")
+        elif fid in {"audio.multiband.saturation", "audio.saturation.softclip"}:
+            # El drive se compensa dentro del plugin; se reserva margen para los
+            # armónicos añadidos al mezclar la rama wet.
+            drive = _positive(p.get("drive_db", 0.0))
+            mix = min(1.0, _positive(p.get("mix", 0.0)))
+            add(index, action, target, min(1.5, drive * mix * 0.10), "harmonic_energy")
+        elif fid == "audio.saturation.exciter":
+            amount = _positive(p.get("amount", 0.0))
+            mix = min(1.0, _positive(p.get("mix", 0.0)))
+            add(index, action, ("high_mid", "air"), min(1.5, amount * mix * 0.15), "exciter_energy")
+        elif fid == "audio.vocal.center_naturalizer":
+            add(index, action, ("low_mid", "mid"),
+                _positive(p.get("body_gain_db", 0.0)) * min(1.0, _positive(p.get("mix", 0.0))),
+                "vocal_body")
+        elif fid in {"audio.multiband.stereo_width", "audio.stereo.correlation_guard"}:
+            width = _positive(p.get("width", 1.0))
+            if width > 1.0:
+                # Side puede sumar en fase con Mid; 20log10(width) es una cota
+                # conservadora del aumento de pico atribuible al ensanchado.
+                import math
+                add(index, action, target, 20.0 * math.log10(width), "stereo_peak")
+
+    rounded = {band: round(value, 3) for band, value in totals.items()}
+    worst_band = max(rounded, key=rounded.get)
+    return {
+        "effective_boost_by_band_db": rounded,
+        "worst_band": worst_band,
+        "worst_boost_db": rounded[worst_band],
+        "contributions": contributions,
+    }
 
 
 def evaluate_action_budgets(
@@ -170,6 +258,16 @@ def evaluate_action_budgets(
             violations.append({"governor_id": governor, "error": f"{name} excedido",
                                "value_db": round(used, 3), "limit_db": limits[limit_key]})
 
+    headroom = estimate_effective_band_boosts(actions)
+    for band, used in headroom["effective_boost_by_band_db"].items():
+        if used > limits["effective_band_boost_max_db"] + 1e-9:
+            violations.append({
+                "governor_id": HEADROOM_GOVERNOR_ID,
+                "error": "boost efectivo acumulado excede el headroom de banda",
+                "target": band, "value_db": used,
+                "limit_db": limits["effective_band_boost_max_db"],
+            })
+
     remaining = {
         "tonal_boost_db": round(max(0.0, limits["tonal_boost_total_max_db"] - tonal_boost), 3),
         "tonal_cut_db": round(max(0.0, limits["tonal_cut_total_max_db"] - tonal_cut), 3),
@@ -178,11 +276,13 @@ def evaluate_action_budgets(
     }
     return {
         "status": "passed" if not violations else "rejected",
-        "governors": [TONAL_GOVERNOR_ID, GAIN_GOVERNOR_ID, OVERLAP_GOVERNOR_ID],
+        "governors": [TONAL_GOVERNOR_ID, GAIN_GOVERNOR_ID, OVERLAP_GOVERNOR_ID,
+                      HEADROOM_GOVERNOR_ID],
         "policy": limits, "totals": totals, "remaining": remaining,
         "tonal_by_target": {
             key: {name: round(value, 3) for name, value in values.items()}
             for key, values in tonal_by_target.items()
         },
-        "contributions": contributions, "violations": violations,
+        "contributions": contributions, "headroom_report": headroom,
+        "violations": violations,
     }

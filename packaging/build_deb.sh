@@ -29,7 +29,7 @@ Version: ${version}
 Section: sound
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-venv, python3-pip, ffmpeg, spasm (>= 0.2.10), spasm-skill-ffmpeg-subset (>= 0.2.10)
+Depends: python3 (>= 3.9), python3-venv, python3-pip, ffmpeg, spasm (>= 0.2.3), spasm-skill-ffmpeg-subset (>= 0.2.3~exp1)
 Maintainer: ${maintainer}
 Description: ${description}
 EOF

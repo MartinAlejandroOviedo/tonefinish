@@ -644,9 +644,10 @@ def build_about_tab(window) -> QWidget:
         f"{APP_NAME} {APP_VERSION}\n"
         "By SABE Software\n\n"
         "Creditos:\n"
-        "Martin Alejandro Oviedo + Ashriel\n\n"
+        "Direccion y desarrollo: Martin Alejandro Oviedo\n"
+        "Asistencia tecnica: Codex (OpenAI)\n\n"
         "Contacto:\n"
-        "martinoviedo@disroot.orgh\n\n"
+        "martinoviedo@disroot.org\n\n"
         "Licencia:\n"
         "Licencia de pago (posible donation ware a partir de un monto)."
     )

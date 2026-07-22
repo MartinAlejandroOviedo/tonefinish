@@ -4,6 +4,8 @@ from ia_mastering import validate_mastering_strategy
 from processes.budgets import (
     GAIN_GOVERNOR_ID, OVERLAP_GOVERNOR_ID, TONAL_GOVERNOR_ID,
     evaluate_action_budgets,
+    estimate_effective_band_boosts,
+    HEADROOM_GOVERNOR_ID,
 )
 from processes.catalog import function_registry
 from processes.contracts import AudioFunctionAction
@@ -97,6 +99,31 @@ class AiBudgetTests(unittest.TestCase):
         report = evaluate_action_budgets(actions)
         self.assertEqual([a.params["gain_db"] for a in actions], [-2.0, 1.0])
         self.assertEqual([c["value_db"] for c in report["contributions"]], [-2.0, 1.0])
+
+    def test_different_plugins_accumulate_effective_boost_in_same_band(self):
+        actions = [
+            AudioFunctionAction("audio.multiband.eq", target="mid",
+                                params={"gain_db": 1.5}),
+            AudioFunctionAction("audio.transient.dynamic_control",
+                                params={"amount_db": 1.2, "threshold_db": -18.0,
+                                        "attack_ms": 10.0, "release_ms": 120.0}),
+        ]
+        report = evaluate_action_budgets(actions)
+        self.assertAlmostEqual(
+            estimate_effective_band_boosts(actions)["effective_boost_by_band_db"]["mid"], 2.7)
+        self.assertTrue(any(v["governor_id"] == HEADROOM_GOVERNOR_ID
+                            for v in report["violations"]))
+
+    def test_cuts_do_not_hide_dynamic_boost_headroom(self):
+        actions = [
+            AudioFunctionAction("audio.multiband.eq", target="air", params={"gain_db": -2.0}),
+            AudioFunctionAction("audio.spectral.dullness_recovery",
+                                params={"frequency_hz": 9000.0, "max_boost_db": 2.6,
+                                        "threshold_db": -30.0, "ratio": 2.0,
+                                        "attack_ms": 20.0, "release_ms": 150.0}),
+        ]
+        estimate = estimate_effective_band_boosts(actions)
+        self.assertEqual(estimate["effective_boost_by_band_db"]["air"], 2.6)
 
 
 if __name__ == "__main__":

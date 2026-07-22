@@ -1,6 +1,6 @@
 name: tonefinish
 base: core22
-version: "1.0.3"
+version: "4.2.2"
 summary: Audio finisher con analisis y normalizacion
 description: |
   ToneFinish es una aplicacion de audio para analizar, normalizar y finalizar audio.
