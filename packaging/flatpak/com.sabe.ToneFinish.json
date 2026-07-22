@@ -25,21 +25,38 @@
       "buildsystem": "simple",
       "build-commands": [
         "install -d /app/tonefinish",
-        "cp -a audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py /app/tonefinish/",
-        "cp -a requirements.txt VERSION README.md /app/tonefinish/",
+        "install -d /app/tonefinish/wheels",
+        "find . -maxdepth 1 -type f -name '*.py' ! -name 'test_*.py' -exec cp -a -t /app/tonefinish/ {} +",
+        "cp -a ui processes mastering_modules assets docs scripts spasm_cli /app/tonefinish/",
+        "cp -a requirements.txt requirements-lock.txt runtime_lock.json VERSION README.md /app/tonefinish/",
+        "find /app/tonefinish -type d -name __pycache__ -prune -exec rm -rf {} +",
+        "find /app/tonefinish -type f -name '*.pyc' -delete",
+        "cp -a packaging/flatpak/wheels/*.whl /app/tonefinish/wheels/",
         "install -d /app/share/applications",
         "install -d /app/share/icons/hicolor/scalable/apps",
-        "cp -a packaging/deb/tonefinish.desktop /app/share/applications/tonefinish.desktop",
-        "cp -a assets/tonefinish.svg /app/share/icons/hicolor/scalable/apps/tonefinish.svg",
-        "pip3 install --prefix=/app -r requirements.txt",
+        "cp -a packaging/flatpak/com.sabe.ToneFinish.desktop /app/share/applications/com.sabe.ToneFinish.desktop",
+        "cp -a assets/tonefinish.svg /app/share/icons/hicolor/scalable/apps/com.sabe.ToneFinish.svg",
+        "pip3 install --no-index --find-links=/app/tonefinish/wheels --prefix=/app -r /app/tonefinish/requirements.txt",
         "install -d /app/bin",
-        "cat > /app/bin/tonefinish <<'EOF'\n#!/usr/bin/env bash\nexec /app/bin/python /app/tonefinish/main.py\nEOF\n",
+        "cat > /app/bin/tonefinish <<'EOF'\n#!/usr/bin/env bash\nexec /usr/bin/python3 /app/tonefinish/main.py\nEOF\n",
         "chmod 0755 /app/bin/tonefinish"
       ],
       "sources": [
         {
           "type": "dir",
-          "path": "../.."
+          "path": "../..",
+          "skip": [
+            ".git",
+            ".codex",
+            ".venv",
+            ".flatpak-builder",
+            "releases",
+            "packaging/.flatpak-builder",
+            "packaging/build",
+            "packaging/build_flatpak",
+            "packaging/build_flatpak_repo",
+            "packaging/build_rpm"
+          ]
         }
       ]
     }

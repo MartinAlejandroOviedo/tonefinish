@@ -29,7 +29,7 @@ Version: ${version}
 Section: sound
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.9), python3-venv, python3-pip, ffmpeg
+Depends: python3 (>= 3.9), python3-venv, python3-pip, ffmpeg, spasm (>= 0.2.10), spasm-skill-ffmpeg-subset (>= 0.2.10)
 Maintainer: ${maintainer}
 Description: ${description}
 EOF
@@ -91,12 +91,86 @@ chmod 0755 "${pkg_dir}/usr/bin/tonefinish"
 install -m 0644 "${root_dir}/README.md" "${pkg_dir}/usr/lib/${package_name}/README.md"
 install -m 0644 "${root_dir}/VERSION" "${pkg_dir}/usr/lib/${package_name}/VERSION"
 install -m 0644 "${root_dir}/requirements.txt" "${pkg_dir}/usr/lib/${package_name}/requirements.txt"
+install -m 0644 "${root_dir}/requirements-lock.txt" "${pkg_dir}/usr/lib/${package_name}/requirements-lock.txt"
+install -m 0644 "${root_dir}/runtime_lock.json" "${pkg_dir}/usr/lib/${package_name}/runtime_lock.json"
 
-for file in audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py; do
+py_files=(
+  logic_backend.py
+  audio_analysis.py
+  audio_processing.py
+  audio_tools.py
+  analysis_mts.py
+  compute_backend.py
+  resource_governor.py
+  resource_monitor.py
+  audio_preview.py
+  spectrum_analyzer.py
+  auto_master_intelligence.py
+  event_detection.py
+  section_detection.py
+  master_decision_engine.py
+  adaptive_master_shadow.py
+  adaptive_master_renderer.py
+  adaptive_rollout_safety.py
+  adaptive_rollout_phase8.py
+  alternative_tools.py
+  diagnostics.py
+  cache.py
+  config.py
+  filter_graph_builder.py
+  mastering_config.py
+  ui_app.py
+  main.py
+  runtime_reproducibility.py
+  bandcamp_bok.py
+  ia_mastering.py
+  output_naming.py
+)
+
+for file in "${py_files[@]}"; do
   install -m 0644 "${root_dir}/${file}" "${pkg_dir}/usr/lib/${package_name}/${file}"
 done
 
-mkdir -p "${build_root}"
-dpkg-deb --root-owner-group --build "${pkg_dir}" "${build_root}/${package_name}_${version}.deb"
+# Copiar directorios completos
+cp -a "${root_dir}/ui" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/processes" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/mastering_modules" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/assets" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/docs" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/scripts" "${pkg_dir}/usr/lib/${package_name}/"
+cp -a "${root_dir}/spasm_cli" "${pkg_dir}/usr/lib/${package_name}/"
 
-echo "Paquete creado: ${build_root}/${package_name}_${version}.deb"
+# Limpiar artefactos de desarrollo
+find "${pkg_dir}/usr/lib/${package_name}" -type d -name "__pycache__" -prune -exec rm -rf {} +
+find "${pkg_dir}/usr/lib/${package_name}" -type f -name "*.pyc" -delete
+
+mkdir -p "${build_root}"
+deb_path="${build_root}/${package_name}_${version}.deb"
+if command -v dpkg-deb >/dev/null 2>&1; then
+  dpkg-deb --root-owner-group --build "${pkg_dir}" "${deb_path}"
+else
+  # Constructor Debian estándar para entornos mínimos sin dpkg-deb.
+  deb_tmp="$(mktemp -d)"
+  trap 'rm -rf "${deb_tmp}"' EXIT
+  printf '2.0\n' > "${deb_tmp}/debian-binary"
+  (
+    cd "${pkg_dir}/DEBIAN"
+    tar --owner=0 --group=0 -czf "${deb_tmp}/control.tar.gz" .
+  )
+  (
+    cd "${pkg_dir}"
+    tar --owner=0 --group=0 --exclude='./DEBIAN' -czf "${deb_tmp}/data.tar.gz" .
+  )
+  rm -f "${deb_path}"
+  (
+    cd "${deb_tmp}"
+    ar r "${deb_path}" debian-binary control.tar.gz data.tar.gz >/dev/null
+  )
+fi
+
+latest_link="${build_root}/${package_name}_latest.deb"
+rm -f "${latest_link}"
+ln -s "${package_name}_${version}.deb" "${latest_link}"
+
+echo "Paquete creado: ${deb_path}"
+echo "Enlace actualizado -> ${latest_link} -> ${package_name}_${version}.deb"

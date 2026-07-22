@@ -1,0 +1,472 @@
+programa "finisher_logic"
+
+# ============================================================
+# v2.0.0: Gap-based mastering decisions
+# Entrada via stdin: method + args secuenciales
+# Salida via stdout: OK + key=value lines
+# ============================================================
+
+dict band_ideal_rms {
+    "Subbass (20-60 Hz)": -1800,
+    "Bass (60-250 Hz)": -1400,
+    "Low-Mid (250-500 Hz)": -1600,
+    "Mid (500-2k Hz)": -1500,
+    "High-Mid (2k-6k Hz)": -1600,
+    "Air (6k-16k Hz)": -1800,
+}
+
+dict band_ideal_peak {
+    "Subbass (20-60 Hz)": -300,
+    "Bass (60-250 Hz)": -200,
+    "Low-Mid (250-500 Hz)": -250,
+    "Mid (500-2k Hz)": -250,
+    "High-Mid (2k-6k Hz)": -300,
+    "Air (6k-16k Hz)": -400,
+}
+
+# Band labels for iteration
+dict band_labels {
+    "b0": 0,
+    "b1": 0,
+    "b2": 0,
+    "b3": 0,
+    "b4": 0,
+    "b5": 0,
+}
+
+# ============================================================
+# Helpers: same logic as Python but in SpASM
+# ============================================================
+
+# gap = actual - ideal
+func calc_gap(actual: int, ideal: int) {
+    return actual - ideal
+}
+
+# correction = -gap * ratio / 100, clamped to [min_c, max_c]
+func calc_correction(gap: int, ratio: int, min_c: int, max_c: int) {
+    var corr = 0 - gap
+    corr = corr * ratio
+    corr = corr / 100
+    if corr > max_c { corr = max_c }
+    if corr < min_c { corr = min_c }
+    return corr
+}
+
+# Clamp value between min and max
+func clamp(val: int, lo: int, hi: int) {
+    if val < lo { return lo }
+    if val > hi { return hi }
+    return val
+}
+
+# Print a named float value
+func print_kv(name: string, val: int) {
+    print(name)
+    print("=")
+    print_float(val)
+    print("\n")
+    return 0
+}
+
+# Print a named int value
+func print_kv_int(name: string, val: int) {
+    print(name)
+    print("=")
+    print_int(val)
+    print("\n")
+    return 0
+}
+
+# ============================================================
+# Main: dispatch based on method
+# ============================================================
+
+main {
+    input(str) method
+
+    if str_equals(method, "health") != 0 {
+        print("OK\n")
+        print("finisher_logic_bin v2.0.0 gap-based\n")
+        print("methods: health, adapt_preset\n")
+        return 0
+    }
+
+    if str_equals(method, "adapt_preset") != 0 {
+        input(str) preset_name
+        input(int) sub_rms
+        input(int) bass_rms
+        input(int) lowmid_rms
+        input(int) mid_rms
+        input(int) himid_rms
+        input(int) air_rms
+        input(int) sub_peak
+        input(int) bass_peak
+        input(int) lowmid_peak
+        input(int) mid_peak
+        input(int) himid_peak
+        input(int) air_peak
+        input(int) lufs
+        input(int) lra
+        input(int) tp
+        input(int) crest
+        input(int) voice_rms
+
+
+        # ============================================
+        # 1. EQ per band (gap-based)
+        # ============================================
+        var ideal_sub = dict_get(band_ideal_rms, "Subbass (20-60 Hz)")
+        var gap_sub = calc_gap(sub_rms, ideal_sub)
+        var eq_sub = calc_correction(gap_sub, 40, -300, 300)
+
+        var ideal_bass = dict_get(band_ideal_rms, "Bass (60-250 Hz)")
+        var gap_bass = calc_gap(bass_rms, ideal_bass)
+        var eq_bass = calc_correction(gap_bass, 40, -300, 300)
+
+        var ideal_lm = dict_get(band_ideal_rms, "Low-Mid (250-500 Hz)")
+        var gap_lm = calc_gap(lowmid_rms, ideal_lm)
+        var eq_lm = calc_correction(gap_lm, 40, -300, 300)
+
+        var ideal_mid = dict_get(band_ideal_rms, "Mid (500-2k Hz)")
+        var gap_mid = calc_gap(mid_rms, ideal_mid)
+        var eq_mid = calc_correction(gap_mid, 40, -300, 300)
+
+        var ideal_hm = dict_get(band_ideal_rms, "High-Mid (2k-6k Hz)")
+        var gap_hm = calc_gap(himid_rms, ideal_hm)
+        var eq_hm = calc_correction(gap_hm, 40, -300, 300)
+
+        var ideal_air = dict_get(band_ideal_rms, "Air (6k-16k Hz)")
+        var gap_air = calc_gap(air_rms, ideal_air)
+        var eq_air = calc_correction(gap_air, 40, -300, 300)
+
+        # ============================================
+        # 2. Stereo width per band
+        # ============================================
+        # Subbass: base 30, adjust by gap
+        var sw_sub = 30 - gap_sub * 5 / 100
+        sw_sub = clamp(sw_sub, 15, 250)
+        # Bass: base 60
+        var sw_bass = 60 - gap_bass * 5 / 100
+        sw_bass = clamp(sw_bass, 15, 250)
+        # Low-Mid: base 90
+        var sw_lm = 90 - gap_lm * 5 / 100
+        sw_lm = clamp(sw_lm, 15, 250)
+        # Mid: base 90
+        var sw_mid = 90 - gap_mid * 5 / 100
+        sw_mid = clamp(sw_mid, 15, 250)
+        # High-Mid: base 110
+        var sw_hm = 110 - gap_hm * 5 / 100
+        sw_hm = clamp(sw_hm, 15, 250)
+        # Air: base 130
+        var sw_air = 130 - gap_air * 5 / 100
+        sw_air = clamp(sw_air, 15, 250)
+
+        # ============================================
+        # 3. Compression per band (crest-based)
+        # ============================================
+        var crest_sub = sub_peak - sub_rms
+        var crest_bass = bass_peak - bass_rms
+        var crest_lm = lowmid_peak - lowmid_rms
+        var crest_mid = mid_peak - mid_rms
+        var crest_hm = himid_peak - himid_rms
+        var crest_air = air_peak - air_rms
+
+        # Threshold = rms + crest * 50 / 100
+        var comp_margin_sub = crest_sub * 50 / 100
+        if comp_margin_sub < 200 { comp_margin_sub = 200 }
+        if comp_margin_sub > 1000 { comp_margin_sub = 1000 }
+        var comp_thr_sub = sub_rms + comp_margin_sub
+        var comp_margin_bass = crest_bass * 50 / 100
+        if comp_margin_bass < 200 { comp_margin_bass = 200 }
+        if comp_margin_bass > 1000 { comp_margin_bass = 1000 }
+        var comp_thr_bass = bass_rms + comp_margin_bass
+        var comp_margin_lm = crest_lm * 50 / 100
+        if comp_margin_lm < 200 { comp_margin_lm = 200 }
+        if comp_margin_lm > 1000 { comp_margin_lm = 1000 }
+        var comp_thr_lm = lowmid_rms + comp_margin_lm
+        var comp_margin_mid = crest_mid * 50 / 100
+        if comp_margin_mid < 200 { comp_margin_mid = 200 }
+        if comp_margin_mid > 1000 { comp_margin_mid = 1000 }
+        var comp_thr_mid = mid_rms + comp_margin_mid
+        var comp_margin_hm = crest_hm * 50 / 100
+        if comp_margin_hm < 200 { comp_margin_hm = 200 }
+        if comp_margin_hm > 1000 { comp_margin_hm = 1000 }
+        var comp_thr_hm = himid_rms + comp_margin_hm
+        var comp_margin_air = crest_air * 50 / 100
+        if comp_margin_air < 200 { comp_margin_air = 200 }
+        if comp_margin_air > 1000 { comp_margin_air = 1000 }
+        var comp_thr_air = air_rms + comp_margin_air
+
+        # Ratio based on crest
+        var comp_ratio_sub = 12
+        var comp_ratio_bass = 12
+        var comp_ratio_lm = 12
+        var comp_ratio_mid = 12
+        var comp_ratio_hm = 12
+        var comp_ratio_air = 12
+
+        if crest_sub > 1800 { comp_ratio_sub = 30 }
+        if crest_sub > 1200 { comp_ratio_sub = 20 }
+        if crest_sub > 800  { comp_ratio_sub = 15 }
+
+        if crest_bass > 1800 { comp_ratio_bass = 30 }
+        if crest_bass > 1200 { comp_ratio_bass = 20 }
+        if crest_bass > 800  { comp_ratio_bass = 15 }
+
+        if crest_lm > 1800 { comp_ratio_lm = 30 }
+        if crest_lm > 1200 { comp_ratio_lm = 20 }
+        if crest_lm > 800  { comp_ratio_lm = 15 }
+
+        if crest_mid > 1800 { comp_ratio_mid = 30 }
+        if crest_mid > 1200 { comp_ratio_mid = 20 }
+        if crest_mid > 800  { comp_ratio_mid = 15 }
+
+        if crest_hm > 1800 { comp_ratio_hm = 30 }
+        if crest_hm > 1200 { comp_ratio_hm = 20 }
+        if crest_hm > 800  { comp_ratio_hm = 15 }
+
+        if crest_air > 1800 { comp_ratio_air = 30 }
+        if crest_air > 1200 { comp_ratio_air = 20 }
+        if crest_air > 800  { comp_ratio_air = 15 }
+
+        # Attack/release by frequency
+        var comp_atk_sub = 1200
+        var comp_rel_sub = 10000
+        var comp_atk_bass = 1200
+        var comp_rel_bass = 10000
+        var comp_atk_lm = 600
+        var comp_rel_lm = 6000
+        var comp_atk_mid = 600
+        var comp_rel_mid = 6000
+        var comp_atk_hm = 200
+        var comp_rel_hm = 4000
+        var comp_atk_air = 200
+        var comp_rel_air = 4000
+
+        # ============================================
+        # 4. Enable flags
+        # ============================================
+        var band_eq_enabled = 1
+        var band_stereo_enabled = 1
+        var band_compression_enabled = 1
+        var band_limiter_enabled = 0
+        var band_repair_enabled = 0
+
+        # Limiter: check if any peak exceeds ideal
+        var ideal_peak_sub = dict_get(band_ideal_peak, "Subbass (20-60 Hz)")
+        if sub_peak > ideal_peak_sub + 100 { band_limiter_enabled = 1 }
+        if bass_peak > -200 + 100 { band_limiter_enabled = 1 }
+        if himid_peak > -300 + 100 { band_limiter_enabled = 1 }
+        if air_peak > -400 + 100 { band_limiter_enabled = 1 }
+
+        # Repair: denoise in high bands if RMS < -25 dB
+        if himid_rms < -2500 { band_repair_enabled = 1 }
+        if air_rms < -2500 { band_repair_enabled = 1 }
+
+        # ============================================
+        # 5. Headroom based on LUFS gap
+        # ============================================
+        var target_lufs = -1550
+        var gap_lufs = lufs - target_lufs
+        if gap_lufs < 0 { gap_lufs = 0 - gap_lufs }
+        var headroom_db = -1800
+        if gap_lufs > 1500 { headroom_db = -1400 }
+        if gap_lufs > 800  { headroom_db = -1600 }
+
+        # ============================================
+        # 6. Output all decisions
+        # ============================================
+        print("OK\n")
+        print_kv("eq_Subbass (20-60 Hz)", eq_sub)
+        print_kv("eq_Bass (60-250 Hz)", eq_bass)
+        print_kv("eq_Low-Mid (250-500 Hz)", eq_lm)
+        print_kv("eq_Mid (500-2k Hz)", eq_mid)
+        print_kv("eq_High-Mid (2k-6k Hz)", eq_hm)
+        print_kv("eq_Air (6k-16k Hz)", eq_air)
+
+        print_kv("sw_Subbass (20-60 Hz)", sw_sub)
+        print_kv("sw_Bass (60-250 Hz)", sw_bass)
+        print_kv("sw_Low-Mid (250-500 Hz)", sw_lm)
+        print_kv("sw_Mid (500-2k Hz)", sw_mid)
+        print_kv("sw_High-Mid (2k-6k Hz)", sw_hm)
+        print_kv("sw_Air (6k-16k Hz)", sw_air)
+
+        print_kv("comp_thr_Subbass (20-60 Hz)", comp_thr_sub)
+        print_kv("comp_thr_Bass (60-250 Hz)", comp_thr_bass)
+        print_kv("comp_thr_Low-Mid (250-500 Hz)", comp_thr_lm)
+        print_kv("comp_thr_Mid (500-2k Hz)", comp_thr_mid)
+        print_kv("comp_thr_High-Mid (2k-6k Hz)", comp_thr_hm)
+        print_kv("comp_thr_Air (6k-16k Hz)", comp_thr_air)
+
+        print_kv_int("comp_ratio_Subbass (20-60 Hz)", comp_ratio_sub)
+        print_kv_int("comp_ratio_Bass (60-250 Hz)", comp_ratio_bass)
+        print_kv_int("comp_ratio_Low-Mid (250-500 Hz)", comp_ratio_lm)
+        print_kv_int("comp_ratio_Mid (500-2k Hz)", comp_ratio_mid)
+        print_kv_int("comp_ratio_High-Mid (2k-6k Hz)", comp_ratio_hm)
+        print_kv_int("comp_ratio_Air (6k-16k Hz)", comp_ratio_air)
+
+        print_kv_int("band_eq_enabled", band_eq_enabled)
+        print_kv_int("band_stereo_enabled", band_stereo_enabled)
+        print_kv_int("band_compression_enabled", band_compression_enabled)
+        print_kv_int("band_limiter_enabled", band_limiter_enabled)
+        print_kv_int("band_repair_enabled", band_repair_enabled)
+
+        print_kv("headroom_db", headroom_db)
+        print_kv("gap_lufs", gap_lufs)
+
+        print("EQ corrections: ")
+        print_float(eq_sub); print(" ")
+        print_float(eq_bass); print(" ")
+        print_float(eq_lm); print(" ")
+        print_float(eq_mid); print(" ")
+        print_float(eq_hm); print(" ")
+        print_float(eq_air); print("\n")
+        return 0
+    }
+
+    # ============================================
+    # evaluate_mix: rating + advice
+    # ============================================
+    if str_equals(method, "evaluate_mix") != 0 {
+        input(int) eval_input_i
+        input(int) eval_input_tp
+        input(int) eval_input_lra
+        input(int) eval_target_offset
+        input(int) eval_target_lufs
+        input(int) eval_true_peak
+
+        var score = 100
+        var delta = eval_input_i - eval_target_lufs
+        if delta < 0 { delta = 0 - delta }
+
+        if delta <= 100 { print("OK\nNivel integrado OK\n") }
+        if delta > 300 { score = score - 20 }
+        if delta > 100 { score = score - 10 }
+        if delta > 100 { score = score - 15 }
+
+        if eval_input_tp >= eval_true_peak { score = score - 25 }
+        if eval_input_tp >= eval_true_peak - 100 { score = score - 10 }
+
+        if eval_input_lra > 1000 { score = score - 10 }
+        if eval_input_lra < 400 { score = score - 5 }
+
+        if eval_target_offset > 300 { score = score - 10 }
+        if eval_target_offset < -300 { score = score - 10 }
+
+        print("OK\n")
+        if score >= 85 { print("Bueno\n") }
+        if score >= 65 { print("Aceptable\n") }
+        if score < 65 { print("Necesita trabajo\n") }
+        print("Evaluacion automatica\n")
+        return 0
+    }
+
+    # ============================================
+    # resolve_repair_levels: Auto -> Leve/Off
+    # ============================================
+    if str_equals(method, "resolve_repair_levels") != 0 {
+        input(str) rrl_noise
+        input(str) rrl_declip
+        input(str) rrl_declick
+        input(int) rrl_input_tp
+        input(int) rrl_input_thresh
+
+        var resolved_noise = "Off"
+        if str_equals(rrl_noise, "Auto") != 0 {
+            if rrl_input_thresh > -2000 { resolved_noise = "Leve" }
+            if rrl_input_thresh <= -2000 { resolved_noise = "Off" }
+        }
+        if str_equals(rrl_noise, "Auto") == 0 {
+            resolved_noise = rrl_noise
+        }
+
+        var resolved_declip = "Off"
+        if str_equals(rrl_declip, "Auto") != 0 {
+            if rrl_input_tp >= -10 { resolved_declip = "Leve" }
+            if rrl_input_tp < -10 { resolved_declip = "Off" }
+        }
+        if str_equals(rrl_declip, "Auto") == 0 {
+            resolved_declip = rrl_declip
+        }
+
+        var resolved_declick = "Off"
+        if str_equals(rrl_declick, "Auto") != 0 {
+            if rrl_input_tp >= -5 { resolved_declick = "Leve" }
+            if rrl_input_tp < -5 { resolved_declick = "Off" }
+        }
+        if str_equals(rrl_declick, "Auto") == 0 {
+            resolved_declick = rrl_declick
+        }
+
+        print("OK\n")
+        print(resolved_noise)
+        print("\n")
+        print(resolved_declip)
+        print("\n")
+        print(resolved_declick)
+        print("\n")
+        return 0
+    }
+
+    # ============================================
+    # classify_profile: from LRA + crest + lufs → profile name
+    # Input: lra crest has_clipping (all ×100, has_clipping = 0 or 1)
+    # ============================================
+    if str_equals(method, "classify_profile") != 0 {
+        input(int) prof_lra
+        input(int) prof_crest
+        input(int) prof_lufs
+        input(int) prof_clipping
+
+        var profile = "Normal"
+        # Minimal: too compressed + low crest + loud
+        if prof_lra < 400 { profile = "Conservador" }
+        if prof_crest < 600 { profile = "Conservador" }
+        if prof_clipping != 0 { profile = "Conservador" }
+        # Aggressive: high dynamic range + quiet source
+        if prof_lra > 1200 { profile = "Agresivo" }
+        if prof_lufs < -2500 { profile = "Agresivo" }
+
+        print("OK\n")
+        print(profile)
+        print("\n")
+        return 0
+    }
+
+    # ============================================
+    # compute_autogain: headroom + autogain from LUFS gap
+    # Input: lufs target_lufs (×100)
+    # ============================================
+    if str_equals(method, "compute_autogain") != 0 {
+        input(int) ag_lufs
+        input(int) ag_target
+
+        var gap = ag_lufs - ag_target
+        if gap < 0 { gap = 0 - gap }
+        var ag_headroom = -1800
+        if gap > 1500 { ag_headroom = -1400 }
+        if gap > 800  { ag_headroom = -1600 }
+
+        var autogain_on = 1
+        if gap < 200 { autogain_on = 0 }
+
+        var maxgain = 135
+        if gap > 1000 { maxgain = 200 }
+        if gap > 2000 { maxgain = 250 }
+
+        print("OK\n")
+        print_float(ag_headroom)
+        print("\n")
+        print_int(autogain_on)
+        print("\n")
+        print_float(maxgain)
+        print("\n")
+        return 0
+    }
+
+    # Unknown method
+    print("ERR\n")
+    print("unknown method\n")
+    return 1
+}

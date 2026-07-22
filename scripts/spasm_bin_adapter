@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Adapter JSON stdin → binario SpASM compilado → JSON stdout.
+Reemplaza las 2178 líneas de finisher_spasm_cli (bash).
+Solo 45 líneas. Sin bash. Sin intérprete SpASM."""
+import json, subprocess, sys, os
+
+BIN = os.environ.get("FINISHER_LOGIC_BIN",
+    os.path.join(os.path.dirname(__file__), "finisher_logic_bin"))
+
+def main():
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return _err("stdin vacío", 1)
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return _err(f"JSON inválido: {e}", 1)
+
+    method = req.get("method", "")
+    args = req.get("args", [])
+    kwargs = req.get("kwargs", {})
+
+    # Armar stdin para el binario: método + args textuales
+    payload_lines = [method]
+    for a in args:
+        payload_lines.append(str(a))
+    for v in kwargs.values():
+        payload_lines.append(str(v))
+
+    payload = "\n".join(payload_lines) + "\n"
+
+    try:
+        proc = subprocess.run(
+            [BIN],
+            input=payload,
+            text=True,
+            capture_output=True,
+            timeout=int(os.environ.get("FINISHER_SPASM_TIMEOUT_SEC", "600")),
+        )
+    except subprocess.TimeoutExpired:
+        return _err("timeout", 1)
+    except Exception as e:
+        return _err(str(e), 1)
+
+    out = proc.stdout.strip()
+    if not out:
+        return _err("salida vacia", 1)
+
+    # El binario imprime con newlines: "OK\nresult1\nresult2" o "ERR\nerror"
+    lines = [l for l in out.split("\n") if l]
+    if not lines:
+        return _err("salida vacia", 1)
+
+    if lines[0] == "OK":
+        results = lines[1:]
+        if len(results) == 1:
+            _emit({"ok": True, "result": results[0]})
+        else:
+            _emit({"ok": True, "result": results})
+    elif lines[0] == "ERR":
+        error = lines[1] if len(lines) > 1 else "error desconocido"
+        _emit({"ok": False, "error": error})
+    else:
+        _emit({"ok": False, "error": f"respuesta inesperada: {out[:100]}"})
+
+def _emit(payload, code=0):
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    sys.exit(code)
+
+def _err(msg, code=1):
+    _emit({"ok": False, "error": msg}, code)
+
+if __name__ == "__main__":
+    main()

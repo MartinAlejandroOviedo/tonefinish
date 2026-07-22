@@ -1,9 +1,20 @@
+import math
+import os
 import pathlib
-from typing import Dict, Tuple
+import tempfile
+from typing import Callable, Dict, Optional, Tuple
 
-from audio_tools import get_audio_duration, get_audio_sample_rate, run_ffmpeg
+from audio_tools import get_audio_duration, get_audio_info, run_ffmpeg, run_ffmpeg_with_progress, _FFMPEG_BIN
+from alternative_tools import analyze_loudness_ffmpeg, toolchain
+from filter_graph_builder import FilterGraphBuilder
+from mastering_config import MasteringConfig
+from processes.contracts import AudioFunctionAction, AudioProcessContext
+from processes.audit import TAIL_FUNCTION_IDS
+from processes.orchestrator import migrate_legacy_preprocess_config, orchestrator
+from mastering_modules.repair import (
+    resolve_repair_levels as module_resolve_repair_levels,
+)
 from config import (
-    BAND_CONFIG,
     BRICKWALL_EXTRA_DB,
     DEFAULT_BAND_RANGE_DB,
     DEFAULT_MAX_ADJUST_DB,
@@ -11,93 +22,67 @@ from config import (
     MP3_BITRATE,
     TRANSPARENT_BAND_RANGE_DB,
     TRANSPARENT_MAX_ADJUST_DB,
+    TRUE_PEAK_SAFETY_MARGIN_DB,
 )
 
+def _resolve_ffmpeg_target_compensation(
+    *,
+    target_lufs: float,
+    true_peak: float,
+    stats: Dict[str, float],
+) -> tuple[float, float]:
+    """
+    Compensa la diferencia típica entre target solicitado y target realmente logrado por FFmpeg.
 
-def build_deesser_filter(input_path: pathlib.Path, target_hz: float = 6000.0) -> str:
-    """Construye un filtro de de-esser con frecuencia normalizada 0-1."""
-    sample_rate = get_audio_sample_rate(str(input_path))
-    if not sample_rate:
-        return "deesser=i=0.5:m=0.5:f=0.5:s=0.5"
-    nyquist = sample_rate / 2.0
-    normalized = max(0.0, min(1.0, target_hz / nyquist))
-    return f"deesser=i=0.5:m=0.5:f={normalized:.4f}:s=0.5"
+    Retorna:
+      - target_lufs_compensated
+      - true_peak_compensated
+    """
+    lufs_comp_db = float(os.getenv("TONEFINISH_FFMPEG_LUFS_COMP_DB", "0.0") or "0.0")
+    tp_comp_db = float(os.getenv("TONEFINISH_FFMPEG_TP_COMP_DB", "0.0") or "0.0")
 
+    input_lra = float(stats.get("input_lra", float("nan")))
+    input_tp = float(stats.get("input_tp", float("nan")))
 
-def build_multiband_filter(
-    band_stats: Dict[str, float] | None,
-    apply_dynamic_eq: bool,
-    apply_stereo_width: bool,
-    input_label: str,
-    band_range_db: float = DEFAULT_BAND_RANGE_DB,
-    max_adjust_db: float = DEFAULT_MAX_ADJUST_DB,
-) -> Tuple[str, str]:
-    """Crea un filtergraph multibanda con compand y/o stereo width por banda."""
-    split_labels = [f"b{i}" for i in range(len(BAND_CONFIG))]
-    band_outputs = [f"c{i}" for i in range(len(BAND_CONFIG))]
+    # Material muy denso suele empujar más el techo real al final; agregamos margen.
+    if math.isfinite(input_lra) and input_lra <= 4.5:
+        tp_comp_db += 0.10
+    if math.isfinite(input_lra) and input_lra <= 3.5:
+        tp_comp_db += 0.05
 
-    split = f"[{input_label}]asplit={len(BAND_CONFIG)}" + "".join(f"[{label}]" for label in split_labels)
-    parts = [split]
+    # Si llega con picos muy altos, reforzamos compensación de TP.
+    if math.isfinite(input_tp) and input_tp >= -2.0:
+        tp_comp_db += 0.10
 
-    for idx, (label, low_hz, high_hz, attack_s, release_s, width) in enumerate(BAND_CONFIG):
-        band_chain = f"[{split_labels[idx]}]highpass=f={low_hz},lowpass=f={high_hz}"
+    # Límites de seguridad para no sobrecompensar.
+    lufs_comp_db = max(-0.60, min(0.60, lufs_comp_db))
+    tp_comp_db = max(0.0, min(0.90, tp_comp_db))
 
-        if apply_dynamic_eq:
-            if band_stats is None:
-                raise RuntimeError("No hay análisis por bandas disponible para control dinámico.")
-            rms = band_stats.get(label)
-            if rms is None:
-                raise RuntimeError(f"No hay RMS para la banda {label}.")
-
-            low_thr = max(rms - band_range_db, -90.0)
-            high_thr = min(rms + band_range_db, 0.0)
-
-            points = (
-                f"-90/{-90.0 + max_adjust_db:.2f}"
-                f"|{low_thr:.2f}/{low_thr:.2f}"
-                f"|{high_thr:.2f}/{high_thr:.2f}"
-                f"|0/{-max_adjust_db:.2f}"
-            )
-            band_chain += f",compand=attacks={attack_s}:decays={release_s}:points={points}"
-
-        if apply_stereo_width:
-            width_clamped = max(0.015625, min(64.0, width))
-            band_chain += f",stereotools=mlev=1:slev={width_clamped:.2f}"
-
-        band_chain += f"[{band_outputs[idx]}]"
-        parts.append(band_chain)
-
-    mix_label = "mb"
-    mix = "".join(f"[{label}]" for label in band_outputs) + f"amix=inputs={len(BAND_CONFIG)}:normalize=0[{mix_label}]"
-    parts.append(mix)
-
-    return ";".join(parts), mix_label
+    return target_lufs + lufs_comp_db, true_peak - tp_comp_db
 
 
-def build_glue_filter(
-    threshold_db: float,
-    ratio: float,
-    attack_ms: float,
-    release_ms: float,
-    makeup_db: float,
-) -> str:
-    """Construye un filtro de compresion suave tipo glue."""
-    attack_s = max(0.001, attack_ms / 1000.0)
-    release_s = max(0.005, release_ms / 1000.0)
-    makeup_linear = 10 ** (makeup_db / 20.0)
-    makeup_linear = max(1.0, min(64.0, makeup_linear))
+def _is_ffmpeg_filter_assertion(stderr_text: str) -> bool:
+    text = (stderr_text or "").lower()
     return (
-        "acompressor="
-        f"threshold={threshold_db:.2f}dB:"
-        f"ratio={ratio:.2f}:"
-        f"attack={attack_s:.3f}:"
-        f"release={release_s:.3f}:"
-        f"makeup={makeup_linear:.2f}"
+        ("assertion best_input >= 0 failed" in text and "ffmpeg_filter.c" in text)
+        or ("ffmpeg_filter.c" in text and "assertion" in text and "failed" in text)
     )
 
 
-def _level_key(level: str) -> str:
-    return level.strip().lower()
+def _with_safe_filter_threading(cmd: list[str]) -> list[str]:
+    if not cmd or cmd[0] != "ffmpeg":
+        return cmd
+    if "-filter_threads" in cmd or "-filter_complex_threads" in cmd:
+        return cmd
+    patched = cmd.copy()
+    patched[1:1] = ["-filter_threads", "1", "-filter_complex_threads", "1"]
+    return patched
+
+
+def _with_safe_filter_threading_if_needed(cmd: list[str]) -> list[str]:
+    if "-filter_complex" not in cmd:
+        return cmd
+    return _with_safe_filter_threading(cmd)
 
 
 def resolve_repair_levels(
@@ -106,73 +91,12 @@ def resolve_repair_levels(
     declip_level: str,
     declick_level: str,
 ) -> Tuple[str, str, str]:
-    """Resuelve niveles Auto a niveles concretos según el análisis."""
-    if stats is None:
-        return noise_level, declip_level, declick_level
-
-    input_tp = stats.get("input_tp", 0.0)
-    input_thresh = stats.get("input_thresh", -50.0)
-
-    def resolve_noise(level: str) -> str:
-        if _level_key(level) != "auto":
-            return level
-        return "Leve" if input_thresh > -35.0 else "Off"
-
-    def resolve_declip(level: str) -> str:
-        if _level_key(level) != "auto":
-            return level
-        return "Leve" if input_tp >= -0.3 else "Off"
-
-    def resolve_declick(level: str) -> str:
-        if _level_key(level) != "auto":
-            return level
-        return "Leve" if input_tp >= -0.2 else "Off"
-
-    return resolve_noise(noise_level), resolve_declip(declip_level), resolve_declick(declick_level)
-
-
-def build_repair_chain(
-    input_label: str,
-    noise_level: str,
-    declip_level: str,
-    declick_level: str,
-) -> Tuple[str, str]:
-    """Construye filtros de repair (noise/clip/click) antes del resto."""
-    parts = []
-    current = input_label
-
-    def add_filter(filter_expr: str, label: str) -> None:
-        nonlocal current
-        parts.append(f"[{current}]{filter_expr}[{label}]")
-        current = label
-
-    level = _level_key(declip_level)
-    if level not in ("off", "apagado"):
-        add_filter("adeclip", "dc")
-
-    level = _level_key(declick_level)
-    if level not in ("off", "apagado"):
-        if level == "leve":
-            add_filter("adeclick=a=0.20", "dk")
-        elif level == "medio":
-            add_filter("adeclick=a=0.40", "dk")
-        elif level == "alto":
-            add_filter("adeclick=a=0.60", "dk")
-        else:
-            add_filter("adeclick", "dk")
-
-    level = _level_key(noise_level)
-    if level not in ("off", "apagado"):
-        if level == "leve":
-            add_filter("afftdn=nr=6:nf=-30", "nr")
-        elif level == "medio":
-            add_filter("afftdn=nr=12:nf=-35", "nr")
-        elif level == "alto":
-            add_filter("afftdn=18:nf=-40", "nr")
-        else:
-            add_filter("afftdn=nr=6:nf=-30", "nr")
-
-    return ";".join(parts), current
+    return module_resolve_repair_levels(
+        stats=stats,
+        noise_level=noise_level,
+        declip_level=declip_level,
+        declick_level=declick_level,
+    )
 
 
 def build_preprocess_chain(
@@ -181,63 +105,48 @@ def build_preprocess_chain(
     dynamic_eq: bool,
     stereo_width: bool,
     deesser: bool,
-    noise_reduction_level: str = "Off",
-    declip_level: str = "Off",
-    declick_level: str = "Off",
-    glue_enabled: bool = False,
-    glue_threshold_db: float = -18.0,
-    glue_ratio: float = 1.6,
-    glue_attack_ms: float = 20.0,
-    glue_release_ms: float = 120.0,
-    glue_makeup_db: float = 0.0,
-    band_range_db: float = DEFAULT_BAND_RANGE_DB,
-    max_adjust_db: float = DEFAULT_MAX_ADJUST_DB,
+    **kwargs,
 ) -> Tuple[str, str]:
-    """Construye el pre-proceso antes de loudnorm/limiter."""
-    filter_chain = ""
-    input_label = "0:a"
-    repair_chain, repair_output = build_repair_chain(
-        input_label=input_label,
-        noise_level=noise_reduction_level,
-        declip_level=declip_level,
-        declick_level=declick_level,
+    """Construye el preproceso exclusivamente mediante el catálogo de plugins.
+
+    La firma histórica se conserva como adaptador de configuración; ningún filtro
+    DSP se implementa en esta función.
+    """
+    config = dict(kwargs)
+    config.update({
+        "input_path": input_path, "band_stats": band_stats,
+        "dynamic_eq": dynamic_eq, "stereo_width": stereo_width,
+        "deesser": deesser,
+    })
+    raw_ai_actions = config.get("audio_actions")
+    if isinstance(raw_ai_actions, list):
+        all_actions = [
+            item if isinstance(item, AudioFunctionAction) else AudioFunctionAction.from_dict(item)
+            for item in raw_ai_actions
+        ]
+        tail_ids = {
+            "audio.repair.trim_silence", "audio.saturation.hard_clip",
+            "audio.autogain.output_gain", "audio.loudness.normalize",
+            "audio.loudness.fade_in", "audio.loudness.fade_out", "audio.limiter.true_peak",
+        }
+        actions = [action for action in all_actions if action.function_id not in tail_ids]
+    else:
+        actions = migrate_legacy_preprocess_config(**config)
+    info = get_audio_info(str(input_path))
+    sample_rate = int(info.get("sample_rate") or 48000)
+    channels = int(info.get("channels") or 2)
+    duration = info.get("duration")
+    analysis = {
+        "band_rms": band_stats or {}, "sample_rate": sample_rate,
+        "duration": duration,
+    }
+    context = AudioProcessContext(
+        audio_id=str(input_path), sample_rate=sample_rate, channels=channels,
+        duration=float(duration) if isinstance(duration, (int, float)) else None,
+        analysis=analysis,
     )
-    if repair_chain:
-        filter_chain = repair_chain
-        input_label = repair_output
-
-    if deesser:
-        deesser_filter = build_deesser_filter(input_path)
-        deesser_chain = f"[{input_label}]{deesser_filter}[des]"
-        filter_chain = ";".join(part for part in [filter_chain, deesser_chain] if part)
-        input_label = "des"
-
-    if dynamic_eq or stereo_width:
-        filter_chain_mb, filter_output = build_multiband_filter(
-            band_stats=band_stats,
-            apply_dynamic_eq=dynamic_eq,
-            apply_stereo_width=stereo_width,
-            input_label=input_label,
-            band_range_db=band_range_db,
-            max_adjust_db=max_adjust_db,
-        )
-        filter_chain = ";".join(part for part in [filter_chain, filter_chain_mb] if part)
-        input_label = filter_output
-
-    if glue_enabled:
-        glue_filter = build_glue_filter(
-            threshold_db=glue_threshold_db,
-            ratio=glue_ratio,
-            attack_ms=glue_attack_ms,
-            release_ms=glue_release_ms,
-            makeup_db=glue_makeup_db,
-        )
-        glue_label = "glue"
-        glue_chain = f"[{input_label}]{glue_filter}[{glue_label}]"
-        filter_chain = ";".join(part for part in [filter_chain, glue_chain] if part)
-        input_label = glue_label
-
-    return filter_chain, input_label
+    graph = orchestrator.compile(actions, context)
+    return graph.filter_chain, graph.output_label
 
 
 def normalize_audio(
@@ -250,34 +159,150 @@ def normalize_audio(
     verbose: bool,
     dynamic_eq: bool = False,
     band_stats: Dict[str, float] | None = None,
-    brickwall: bool = False,
+    master_limiter_enabled: bool = False,
+    master_limiter_mode: str = "transparent",
+    master_limiter_ceiling_db: float = -1.0,
+    master_limiter_release_ms: float = 150.0,
+    master_limiter_lookahead_ms: float = 5.0,
     deesser: bool = False,
+    deesser_freq_hz: float = 6000.0,
+    deesser_intensity: float = 1.0,
+    tone_low_db: float = 0.0,
+    sub_bass_db: float = 0.0,
+    tone_mid_db: float = 0.0,
+    tone_high_db: float = 0.0,
+    tone_tilt_db: float = 0.0,
+    band_adjust_db: Dict[str, float] | None = None,
+    band_widths: Dict[str, float] | None = None,
+    auto_band_gain: bool = False,
+    saturation_enabled: bool = False,
+    saturation_per_band: bool = False,
+    saturation_type: str = "Tape",
+    saturation_drive_db: float = 0.0,
+    saturation_mix: float = 0.0,
+    saturation_band_drive_db: Dict[str, float] | None = None,
+    saturation_band_mix: Dict[str, float] | None = None,
+    process_order: list[str] | None = None,
     stereo_width: bool = False,
+    stereo_dynamic: bool = False,
+    stereo_dynamic_per_band: bool = False,
+    stereo_dynamic_band_mix: list[float] | None = None,
+    stereo_dynamic_threshold_db: float = -24.0,
+    stereo_dynamic_ratio: float = 1.6,
+    stereo_dynamic_attack_ms: float = 20.0,
+    stereo_dynamic_release_ms: float = 150.0,
+    stereo_dynamic_mix: float = 0.6,
     noise_reduction_level: str = "Off",
     declip_level: str = "Off",
     declick_level: str = "Off",
+    pink_noise_level: str = "Off",
     glue_enabled: bool = False,
     glue_threshold_db: float = -18.0,
-    glue_ratio: float = 1.6,
+    glue_ratio: float = 1.4,
     glue_attack_ms: float = 20.0,
     glue_release_ms: float = 120.0,
+    glue_knee_db: float = 6.0,
     glue_makeup_db: float = 0.0,
+    headroom_db: float = -17.0,
     output_sr: int | None = None,
     output_bit_depth: str | None = None,
     output_format: str | None = None,
     metadata: Dict[str, str] | None = None,
     fade_in: float = 0.0,
     fade_out: float = 0.0,
+    auto_fade_cap: bool = True,
+    trim_edge_silence: bool = False,
     transparent_mode: bool = False,
+    limiter_ceiling_db: float | None = None,
+    limiter_release_ms: float | None = None,
+    repair_enabled: bool = True,
+    mix_enabled: bool = True,
+    master_enabled: bool = True,
+    autogain_enabled: bool = True,
+    autogain_maxgain: float | None = None,
+    multiband_limiter_enabled: bool = False,
+    multiband_limiter_thresholds: Dict[str, float] | None = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
+    two_pass_normalize: bool = False,
+    enable_clipper: bool = False,
+    clipper_ceiling_db: float = -1.5,
+    audio_actions: list[Dict[str, object]] | None = None,
 ) -> str:
-    """Aplica la segunda pasada de loudnorm con los valores medidos."""
+    """Normaliza y procesa usando exclusivamente acciones del catálogo DSP."""
     if output_path.exists() and not overwrite:
-        raise FileExistsError(f"El archivo de salida {output_path} ya existe. Usa --overwrite para reemplazarlo.")
+        raise FileExistsError(
+            f"El archivo de salida {output_path} ya existe. Usa --overwrite para reemplazarlo."
+        )
+
+    measured_input_lra = float(stats.get("input_lra", float("nan")))
+    if autogain_enabled and math.isfinite(measured_input_lra) and measured_input_lra <= 4.5:
+        if autogain_maxgain is None:
+            autogain_maxgain = 1.4
+        else:
+            autogain_maxgain = min(float(autogain_maxgain), 1.4)
+
+    # === COMPENSACIÓN FEED-FORWARD DE TARGETS FFmpeg ===
+    # Ajusta los targets solicitados para acercar el resultado real al esperado.
+    compensated_target_lufs, compensated_true_peak = _resolve_ffmpeg_target_compensation(
+        target_lufs=target_lufs,
+        true_peak=true_peak,
+        stats=stats,
+    )
+
+    # === APLICAR MARGEN DE SEGURIDAD PARA TRUE PEAK ===
+    # FFmpeg no garantiza True Peak exacto debido a inter-sample peaks.
+    # Restamos el margen para garantizar que el resultado real sea <= target.
+    effective_true_peak = compensated_true_peak - TRUE_PEAK_SAFETY_MARGIN_DB
 
     filter_chain = ""
     filter_output = ""
-    deesser_filter = build_deesser_filter(input_path)
-    if dynamic_eq or stereo_width or deesser:
+    processing_cfg = MasteringConfig(
+        dynamic_eq=dynamic_eq,
+        stereo_width=stereo_width,
+        deesser=deesser,
+        saturation_enabled=saturation_enabled,
+        saturation_per_band=saturation_per_band,
+        stereo_dynamic=stereo_dynamic,
+        glue_enabled=glue_enabled,
+        auto_band_gain=auto_band_gain,
+        tone_low_db=tone_low_db,
+        tone_mid_db=tone_mid_db,
+        tone_high_db=tone_high_db,
+        tone_tilt_db=tone_tilt_db,
+        band_adjust_db=band_adjust_db,
+        band_widths=band_widths,
+        noise_reduction_level=noise_reduction_level,
+        declip_level=declip_level,
+        declick_level=declick_level,
+        pink_noise_level=pink_noise_level,
+        repair_enabled=repair_enabled,
+        mix_enabled=mix_enabled,
+    )
+    # === AUTO-AJUSTE DE HEADROOM PARA FUENTES MUY BAJAS ===
+    # Si la fuente está muy por debajo del target, reducimos el headroom
+    # para no enterrar la señal en el ruido de piso antes de procesar.
+    source_lufs = float(stats.get("input_i", 0.0))
+    if math.isfinite(source_lufs) and source_lufs < -25.0:
+        gap = target_lufs - source_lufs
+        if gap > 20.0:
+            effective_headroom_db = -8.0
+        elif gap > 12.0:
+            effective_headroom_db = -12.0
+        elif gap > 8.0:
+            effective_headroom_db = -15.0
+        else:
+            effective_headroom_db = headroom_db
+    else:
+        effective_headroom_db = headroom_db
+
+    ai_actions = [AudioFunctionAction.from_dict(item) for item in audio_actions] if audio_actions else []
+    ai_preprocess_ids = {
+        action.function_id for action in ai_actions
+        if action.function_id not in TAIL_FUNCTION_IDS
+    }
+    preprocess_needed = bool(ai_preprocess_ids) or processing_cfg.needs_preprocess()
+    master_loudness_stats: Dict[str, float] | None = None if preprocess_needed else stats
+    if preprocess_needed:
         band_range = TRANSPARENT_BAND_RANGE_DB if transparent_mode else DEFAULT_BAND_RANGE_DB
         max_adjust = TRANSPARENT_MAX_ADJUST_DB if transparent_mode else DEFAULT_MAX_ADJUST_DB
         filter_chain, filter_output = build_preprocess_chain(
@@ -286,40 +311,364 @@ def normalize_audio(
             dynamic_eq=dynamic_eq,
             stereo_width=stereo_width,
             deesser=deesser,
+            deesser_freq_hz=deesser_freq_hz,
+            deesser_intensity=deesser_intensity,
+            tone_low_db=tone_low_db,
+            sub_bass_db=sub_bass_db,
+            tone_mid_db=tone_mid_db,
+            tone_high_db=tone_high_db,
+            tone_tilt_db=tone_tilt_db,
+            band_adjust_db=band_adjust_db,
+            band_widths=band_widths,
+            auto_band_gain=auto_band_gain,
+            saturation_enabled=saturation_enabled,
+            saturation_per_band=saturation_per_band,
+            saturation_type=saturation_type,
+            saturation_drive_db=saturation_drive_db,
+            saturation_mix=saturation_mix,
+            saturation_band_drive_db=saturation_band_drive_db,
+            saturation_band_mix=saturation_band_mix,
+            process_order=process_order,
+            stereo_dynamic=stereo_dynamic,
+            stereo_dynamic_per_band=stereo_dynamic_per_band,
+            stereo_dynamic_band_mix=stereo_dynamic_band_mix,
+            stereo_dynamic_threshold_db=stereo_dynamic_threshold_db,
+            stereo_dynamic_ratio=stereo_dynamic_ratio,
+            stereo_dynamic_attack_ms=stereo_dynamic_attack_ms,
+            stereo_dynamic_release_ms=stereo_dynamic_release_ms,
+            stereo_dynamic_mix=stereo_dynamic_mix,
             noise_reduction_level=noise_reduction_level,
             declip_level=declip_level,
             declick_level=declick_level,
+            pink_noise_level=pink_noise_level,
             glue_enabled=glue_enabled,
             glue_threshold_db=glue_threshold_db,
             glue_ratio=glue_ratio,
             glue_attack_ms=glue_attack_ms,
             glue_release_ms=glue_release_ms,
+            glue_knee_db=glue_knee_db,
             glue_makeup_db=glue_makeup_db,
             band_range_db=band_range,
             max_adjust_db=max_adjust,
+            headroom_db=effective_headroom_db,
+            repair_enabled=repair_enabled,
+            mix_enabled=mix_enabled,
+            autogain_enabled=autogain_enabled,
+            autogain_maxgain=autogain_maxgain,
+            multiband_limiter_enabled=multiband_limiter_enabled,
+            multiband_limiter_thresholds=multiband_limiter_thresholds,
+            audio_actions=audio_actions,
         )
 
-    loudnorm_filter = (
-        f"loudnorm=I={target_lufs}:LRA=11:TP={true_peak}"
-        f":measured_I={stats['input_i']}"
-        f":measured_LRA={stats['input_lra']}"
-        f":measured_TP={stats['input_tp']}"
-        f":measured_thresh={stats['input_thresh']}"
-        f":offset={stats['target_offset']}"
-        ":linear=true:print_format=summary"
-    )
-    limit_db = true_peak + BRICKWALL_EXTRA_DB
-    limit_linear = max(0.0625, min(1.0, 10 ** (limit_db / 20.0)))
-    limiter_filter = f"alimiter=limit={limit_linear:.6f}:attack=1:release=100"
+    # Fase A performance:
+    # Activamos two-pass automático cuando el audio tiene poca dinámica
+    # o los picos están cerca del límite. Esto da mediciones precisas
+    # después del preproceso.
+    if preprocess_needed and not two_pass_normalize:
+        measured_input_tp = float(stats.get("input_tp", float("nan")))
+        measured_input_lra = float(stats.get("input_lra", float("nan")))
+        near_tp_limit = math.isfinite(measured_input_tp) and measured_input_tp > -6.0
+        low_dynamic = math.isfinite(measured_input_lra) and measured_input_lra <= 6.0
+        conservative_gain = autogain_maxgain is not None and float(autogain_maxgain) <= 3.0
+        # Forzar two-pass cuando la fuente está muy lejos del target (>15 LU)
+        # El modo single-pass no logra corregir gaps grandes.
+        far_from_target = math.isfinite(source_lufs) and (target_lufs - source_lufs) > 15.0
+        if low_dynamic or near_tp_limit or conservative_gain or far_from_target:
+            two_pass_normalize = True
+
+    # Si hay preproceso significativo, los stats originales ya no son válidos
+    # porque saturación, glue, etc. cambian el nivel.
+    if preprocess_needed:
+        if two_pass_normalize:
+            # Modo de dos pasadas REAL: procesar a temporal, analizar, luego normalizar
+            # Esto es más lento pero mucho más preciso
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                tmp_path = pathlib.Path(tmp.name)
+            
+            try:
+                # Pasada 1: Aplicar preproceso a archivo temporal (sin loudnorm)
+                tmp_filter_complex = FilterGraphBuilder.preprocess_to_output(filter_chain, filter_output)
+                tmp_cmd = [
+                    _FFMPEG_BIN, "-hide_banner", "-nostdin", "-y",
+                    "-i", str(input_path),
+                    "-filter_complex", tmp_filter_complex,
+                    "-map", "[out]",
+                    "-c:a", "pcm_f32le",
+                    str(tmp_path),
+                ]
+                tmp_cmd = _with_safe_filter_threading_if_needed(tmp_cmd)
+                tmp_result = run_ffmpeg(tmp_cmd, verbose=verbose)
+                if tmp_result.returncode != 0 and _is_ffmpeg_filter_assertion(tmp_result.stderr):
+                    tmp_cmd_safe = _with_safe_filter_threading(tmp_cmd)
+                    tmp_result = run_ffmpeg(tmp_cmd_safe, verbose=verbose)
+                if tmp_result.returncode != 0:
+                    raise RuntimeError(f"Pasada 1 falló: {tmp_result.stderr.strip()}")
+                
+                # Analizar el audio preprocesado
+                measured_stats = analyze_loudness_ffmpeg(str(tmp_path))
+                
+                if measured_stats:
+                    master_loudness_stats = measured_stats
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    
+    effective_fade_in = fade_in
+    effective_fade_out = fade_out
+    if auto_fade_cap and (fade_in > 0 or fade_out > 0):
+        try:
+            from audio_analysis import analyze_silence_edges
+            auto_in, auto_out, _detail = analyze_silence_edges(str(input_path))
+            if fade_in > 0 and auto_in > 0:
+                effective_fade_in = min(fade_in, auto_in)
+            if fade_out > 0 and auto_out > 0:
+                effective_fade_out = min(fade_out, auto_out)
+        except Exception:
+            pass
+
     fade_filters: list[str] = []
-    if fade_in > 0:
-        fade_filters.append(f"afade=t=in:ss=0:d={fade_in:.3f}")
-    if fade_out > 0:
+    if effective_fade_in > 0:
+        fade_filters.append(f"afade=t=in:ss=0:d={effective_fade_in:.3f}")
+    if effective_fade_out > 0:
         duration = get_audio_duration(str(input_path))
         if duration:
-            start = max(0.0, duration - fade_out)
-            fade_filters.append(f"afade=t=out:st={start:.3f}:d={fade_out:.3f}")
+            start = max(0.0, duration - effective_fade_out)
+            fade_filters.append(f"afade=t=out:st={start:.3f}:d={effective_fade_out:.3f}")
+    codec_args = _build_codec_args(output_sr, output_bit_depth, output_format)
+    metadata_args = _build_metadata_args(metadata)
 
+    # Si master_enabled=False, solo aplicamos los filtros de preprocess (si hay)
+    if not master_enabled:
+        if filter_chain:
+            # Solo aplicar preprocess, sin loudnorm/limiter/fades
+            filter_complex = FilterGraphBuilder.preprocess_to_output(filter_chain, filter_output)
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y" if overwrite else "-n",
+                "-i",
+                str(input_path),
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[out]",
+                *metadata_args,
+                *codec_args,
+                str(output_path),
+            ]
+            cmd = _with_safe_filter_threading_if_needed(cmd)
+        else:
+            # Sin preprocess ni master, solo copiar/convertir
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-y" if overwrite else "-n",
+                "-i",
+                str(input_path),
+                *metadata_args,
+                *codec_args,
+                str(output_path),
+            ]
+        result = run_ffmpeg(cmd, verbose=verbose)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg falló: {result.stderr.strip()}")
+        return result.stderr
+
+    info = get_audio_info(str(input_path))
+    input_sr = int(info.get("sample_rate") or 48000)
+    input_channels = int(info.get("channels") or 2)
+    input_duration = info.get("duration")
+    master_context = AudioProcessContext(
+        audio_id=str(input_path), sample_rate=input_sr, channels=input_channels,
+        duration=float(input_duration) if isinstance(input_duration, (int, float)) else None,
+        analysis={"loudness_stats": master_loudness_stats} if master_loudness_stats else {},
+    )
+    master_actions = [action for action in ai_actions if action.function_id in TAIL_FUNCTION_IDS]
+    normalized_master_actions: list[AudioFunctionAction] = []
+    for action in master_actions:
+        params = dict(action.params)
+        if action.function_id == "audio.loudness.normalize":
+            params["target_lufs"] = compensated_target_lufs
+            params["true_peak_db"] = min(float(params.get("true_peak_db", effective_true_peak)), effective_true_peak)
+        normalized_master_actions.append(AudioFunctionAction(
+            action.function_id, action.enabled, params, action.target,
+            action.reason, action.confidence, action.operation, action.evidence,
+        ))
+    master_actions = normalized_master_actions
+    if not master_actions:
+        master_actions = [AudioFunctionAction(
+            "audio.loudness.normalize",
+            params={"target_lufs": compensated_target_lufs, "true_peak_db": effective_true_peak,
+                    "lra": 11.0, "dual_mono": input_channels == 1},
+        )]
+        if effective_fade_in > 0:
+            master_actions.append(AudioFunctionAction(
+                "audio.loudness.fade_in", params={"duration_seconds": effective_fade_in}
+            ))
+        if effective_fade_out > 0:
+            master_actions.append(AudioFunctionAction(
+                "audio.loudness.fade_out", params={"duration_seconds": effective_fade_out}
+            ))
+
+    graph_parts = [filter_chain] if filter_chain else []
+    current_label = filter_output if filter_chain else "0:a"
+    if trim_edge_silence and not any(a.function_id == "audio.repair.trim_silence" for a in master_actions):
+        trim_graph = orchestrator.compile([AudioFunctionAction(
+            "audio.repair.trim_silence", params={
+                "start_threshold_db": -50.0, "start_duration_seconds": 0.3,
+                "end_threshold_db": -45.0, "end_duration_seconds": 1.5,
+            },
+        )], master_context, current_label)
+        graph_parts.append(trim_graph.filter_chain)
+        current_label = trim_graph.output_label
+    # El limiter se compila después del resampling para mantener el ceiling real.
+    limiter_actions = [a for a in master_actions if a.function_id == "audio.limiter.true_peak"]
+    pre_limiter_actions = [a for a in master_actions if a.function_id != "audio.limiter.true_peak"]
+    master_graph = orchestrator.compile(pre_limiter_actions, master_context, current_label)
+    if master_graph.filter_chain:
+        graph_parts.append(master_graph.filter_chain)
+        current_label = master_graph.output_label
+
+    if enable_clipper and not any(a.function_id == "audio.saturation.hard_clip" for a in master_actions):
+        clip_graph = orchestrator.compile([AudioFunctionAction(
+            "audio.saturation.hard_clip", params={"ceiling_db": clipper_ceiling_db},
+        )], master_context, current_label)
+        graph_parts.append(clip_graph.filter_chain)
+        current_label = clip_graph.output_label
+    if output_sr:
+        graph_parts.append(f"[{current_label}]aresample={output_sr}[resampled]")
+        current_label = "resampled"
+
+    if limiter_actions or master_limiter_enabled:
+        safe_ceiling = min(
+            effective_true_peak,
+            master_limiter_ceiling_db if master_limiter_ceiling_db is not None else effective_true_peak,
+        )
+        limiter_context = AudioProcessContext(
+            audio_id=str(input_path), sample_rate=int(output_sr or input_sr),
+            channels=input_channels, duration=master_context.duration,
+            analysis={"true_peak": stats.get("input_tp"), "sample_rate": int(output_sr or input_sr)},
+        )
+        effective_limiter_actions = [AudioFunctionAction(
+            action.function_id, action.enabled,
+            {**dict(action.params), "ceiling_db": min(float(action.params.get("ceiling_db", safe_ceiling)), safe_ceiling)},
+            action.target, action.reason, action.confidence, action.operation, action.evidence,
+        ) for action in limiter_actions] or [AudioFunctionAction(
+            "audio.limiter.true_peak", params={
+                "ceiling_db": safe_ceiling, "release_ms": master_limiter_release_ms,
+                "lookahead_ms": master_limiter_lookahead_ms, "mode": master_limiter_mode,
+                "oversampling": 4,
+            },
+        )]
+        limiter_graph = orchestrator.compile(effective_limiter_actions, limiter_context, current_label)
+        graph_parts.append(limiter_graph.filter_chain)
+        current_label = limiter_graph.output_label
+
+    graph_parts.append(f"[{current_label}]anull[out]")
+    filter_complex = ";".join(part for part in graph_parts if part)
+    codec_args_final = []
+    skip_next = False
+    for arg in codec_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if output_sr and arg == "-ar":
+            skip_next = True
+            continue
+        codec_args_final.append(arg)
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-y" if overwrite else "-n",
+        "-i", str(input_path), "-filter_complex", filter_complex, "-map", "[out]",
+        *metadata_args, *codec_args_final, str(output_path),
+    ]
+    cmd = _with_safe_filter_threading_if_needed(cmd)
+    cmd_str = " ".join(cmd)
+    # Usar run_ffmpeg_with_progress si hay callback, sino run_ffmpeg normal
+    if progress_callback:
+        duration = get_audio_duration(str(input_path))
+        if duration and duration > 0:
+            result = run_ffmpeg_with_progress(cmd, duration, progress_callback, verbose=verbose)
+        else:
+            result = run_ffmpeg(cmd, verbose=verbose)
+    else:
+        result = run_ffmpeg(cmd, verbose=verbose)
+    
+    if result.returncode != 0 and _is_ffmpeg_filter_assertion(result.stderr):
+        retry_cmd = _with_safe_filter_threading(cmd)
+        result = run_ffmpeg(retry_cmd, verbose=verbose)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg falló en normalización:\n"
+            f"CMD: {cmd_str}\n"
+            f"{result.stderr.strip()}"
+        )
+    return result.stderr
+
+
+def apply_output_gain(
+    input_path: pathlib.Path,
+    output_path: pathlib.Path,
+    gain_db: float,
+    true_peak: float,
+    limiter_ceiling_db: float | None = None,
+    limiter_release_ms: float | None = None,
+    output_sr: int | None = None,
+    output_bit_depth: str | None = None,
+    output_format: str | None = None,
+    metadata: Dict[str, str] | None = None,
+    overwrite: bool = False,
+    verbose: bool = False,
+) -> str:
+    """Aplica ganancia y límite final mediante el orquestador de plugins."""
+    codec_args = _build_codec_args(output_sr, output_bit_depth, output_format)
+    metadata_args = _build_metadata_args(metadata)
+    limit_db = true_peak + BRICKWALL_EXTRA_DB
+    if limiter_ceiling_db is not None:
+        limit_db = min(limiter_ceiling_db, limit_db)
+    release_ms = limiter_release_ms if limiter_release_ms is not None else 100.0
+    info = get_audio_info(str(input_path))
+    sample_rate = int(output_sr or info.get("sample_rate") or 48000)
+    channels = int(info.get("channels") or 2)
+    context = AudioProcessContext(
+        str(input_path), sample_rate, channels,
+        analysis={"true_peak": true_peak, "sample_rate": sample_rate},
+    )
+    graph = orchestrator.compile([
+        AudioFunctionAction("audio.autogain.output_gain", params={"gain_db": max(-24.0, min(24.0, gain_db))}),
+        AudioFunctionAction("audio.limiter.true_peak", params={
+            "ceiling_db": max(-9.0, min(0.0, limit_db)), "release_ms": release_ms,
+            "lookahead_ms": 5.0, "mode": "transparent", "oversampling": 4,
+        }),
+    ], context)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-y" if overwrite else "-n",
+        "-i",
+        str(input_path),
+        "-filter_complex", graph.filter_chain,
+        "-map", f"[{graph.output_label}]",
+        *metadata_args,
+        *codec_args,
+        str(output_path),
+    ]
+    result = run_ffmpeg(cmd, verbose=verbose)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg falló en ajuste de ganancia: {result.stderr.strip()}")
+    return result.stderr
+
+
+def _build_codec_args(
+    output_sr: int | None,
+    output_bit_depth: str | None,
+    output_format: str | None,
+) -> list[str]:
     codec_args: list[str] = []
     if output_sr:
         codec_args.extend(["-ar", str(output_sr)])
@@ -350,58 +699,16 @@ def normalize_audio(
             codec_args.extend(["-c:a", "pcm_s24le"])
         elif output_bit_depth == "16":
             codec_args.extend(["-c:a", "pcm_s16le"])
+    return codec_args
 
+
+def _build_metadata_args(metadata: Dict[str, str] | None) -> list[str]:
     metadata_args: list[str] = []
     if metadata:
         for key, value in metadata.items():
             if value:
                 metadata_args.extend(["-metadata", f"{key}={value}"])
-
-    if filter_chain:
-        tail_filters = [loudnorm_filter]
-        if brickwall:
-            tail_filters.append(limiter_filter)
-        tail_filters.extend(fade_filters)
-        filter_complex = f"{filter_chain};[{filter_output}]" + ",".join(tail_filters) + "[out]"
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-y" if overwrite else "-n",
-            "-i",
-            str(input_path),
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[out]",
-            *metadata_args,
-            *codec_args,
-            str(output_path),
-        ]
-    else:
-        if deesser:
-            loudnorm_filter = f"{deesser_filter},{loudnorm_filter}"
-        if brickwall:
-            loudnorm_filter = f"{loudnorm_filter},{limiter_filter}"
-        if fade_filters:
-            loudnorm_filter = f"{loudnorm_filter}," + ",".join(fade_filters)
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostdin",
-            "-y" if overwrite else "-n",
-            "-i",
-            str(input_path),
-            "-af",
-            loudnorm_filter,
-            *metadata_args,
-            *codec_args,
-            str(output_path),
-        ]
-    result = run_ffmpeg(cmd, verbose=verbose)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg falló en normalización: {result.stderr.strip()}")
-    return result.stderr
+    return metadata_args
 
 
 def ensure_output_path(output_path: pathlib.Path, output_format: str | None) -> pathlib.Path:

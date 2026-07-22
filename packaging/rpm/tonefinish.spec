@@ -1,12 +1,12 @@
 Name:           tonefinish
-Version:        1.0.3
+Version:        4.2.1
 Release:        1%{?dist}
 Summary:        Audio finisher con analisis y normalizacion (ToneFinish)
 
 License:        Proprietary
 URL:            https://github.com/MartinAlejandroOviedo/tonefinish
-BuildArch:      noarch
-Requires:       python3, ffmpeg
+BuildArch:      x86_64
+Requires:       python3, ffmpeg, spasm >= 0.2.10, spasm-skill-ffmpeg-subset >= 0.2.10
 Source0:        %{name}-%{version}.tar.gz
 
 %description
@@ -23,8 +23,12 @@ mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/share/applications
 mkdir -p %{buildroot}/usr/share/icons/hicolor/scalable/apps
 
-cp -a audio_analysis.py audio_processing.py audio_tools.py config.py ui_app.py main.py normalize_audio.py %{buildroot}/usr/lib/tonefinish/
-cp -a requirements.txt VERSION README.md %{buildroot}/usr/lib/tonefinish/
+find . -maxdepth 1 -type f -name '*.py' ! -name 'test_*.py' \
+  -exec cp -a -t %{buildroot}/usr/lib/tonefinish/ {} +
+cp -a ui processes mastering_modules assets docs scripts spasm_cli %{buildroot}/usr/lib/tonefinish/
+cp -a requirements.txt requirements-lock.txt runtime_lock.json VERSION README.md %{buildroot}/usr/lib/tonefinish/
+find %{buildroot}/usr/lib/tonefinish -type d -name __pycache__ -prune -exec rm -rf {} +
+find %{buildroot}/usr/lib/tonefinish -type f -name '*.pyc' -delete
 cp -a assets/tonefinish.svg %{buildroot}/usr/share/icons/hicolor/scalable/apps/tonefinish.svg
 cp -a packaging/deb/tonefinish.desktop %{buildroot}/usr/share/applications/tonefinish.desktop
 

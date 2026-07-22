@@ -1,0 +1,606 @@
+// Finisher SpASM CLI core v2
+// Compatible con SpASM 0.2.2: select/case, resource safety (recurso/valido/vacio/lleno).
+// Usa features estables: func, try/catch, print multi-arg.
+// Protocolo por stdin:
+// line 1: method
+// line 2..N: args textuales según método
+
+var method = "";
+var status = "ERR";
+var out1 = "";
+var out2 = "";
+var out3 = "";
+var handled = 0;
+var direct_done = 0;
+
+// Registra los 3 slots de output como recursos para validación
+recurso(1); crear(1); asignar(1);  // out1
+recurso(2); crear(2); asignar(2);  // out2
+recurso(3); crear(3); asignar(3);  // out3
+
+func clear_output() {
+    status = "ERR";
+    out1 = "";
+    out2 = "";
+    out3 = "";
+    handled = 0;
+    direct_done = 0;
+    liberar(1); crear(1); asignar(1);
+    liberar(2); crear(2); asignar(2);
+    liberar(3); crear(3); asignar(3);
+}
+
+func set_ok1(a) {
+    status = "OK";
+    out1 = a;
+    out2 = "";
+    out3 = "";
+    handled = 1;
+    escribir(1);
+}
+
+func set_ok2(a, b) {
+    status = "OK";
+    out1 = a;
+    out2 = b;
+    out3 = "";
+    handled = 1;
+    escribir(1);
+    escribir(2);
+}
+
+func set_ok3(a, b, c) {
+    status = "OK";
+    out1 = a;
+    out2 = b;
+    out3 = c;
+    handled = 1;
+    escribir(1);
+    escribir(2);
+    escribir(3);
+}
+
+func set_err1(a) {
+    status = "ERR";
+    out1 = a;
+    out2 = "";
+    out3 = "";
+    handled = 1;
+    escribir(1);
+}
+
+func handle_health() {
+    set_ok1("spasm-cli-core-v2");
+}
+
+func handle_ensure_output_path() {
+    var base_path = "";
+    var fmt = "";
+    input(str) base_path;
+    input(str) fmt;
+    base_path = str_trim(base_path);
+    fmt = str_trim(fmt);
+
+    var ext = "";
+    if (str_equals(fmt, "wav") == 1) { ext = ".wav"; }
+    if (str_equals(fmt, "mp3") == 1) { ext = ".mp3"; }
+    if (str_equals(fmt, "flac") == 1) { ext = ".flac"; }
+    if (str_equals(fmt, "m4a") == 1) { ext = ".m4a"; }
+    if (str_equals(fmt, "ogg") == 1) { ext = ".ogg"; }
+    if (str_equals(fmt, "aiff") == 1) { ext = ".aiff"; }
+
+    if (str_len(ext) == 0) {
+        set_ok1(base_path);
+    } else {
+        var base_len = str_len(base_path);
+        var ext_len = str_len(ext);
+        if (base_len >= ext_len) {
+            var start = base_len - ext_len;
+            var tail = str_slice(base_path, start, ext_len);
+            if (str_equals(tail, ext) == 1) {
+                set_ok2(base_path, "0");
+            } else {
+                set_ok3(base_path, ext, "1");
+            }
+        } else {
+            set_ok3(base_path, ext, "1");
+        }
+    }
+}
+
+func handle_resolve_repair_levels() {
+    try {
+        var noise_level = "";
+        var declip_level = "";
+        var declick_level = "";
+        var has_stats = 0;
+        var input_tp_cdb = 0;
+        var input_thresh_cdb = 0;
+        input(str) noise_level;
+        input(str) declip_level;
+        input(str) declick_level;
+        input(int) has_stats;
+        input(int) input_tp_cdb;
+        input(int) input_thresh_cdb;
+
+        var out_noise = noise_level;
+        var out_declip = declip_level;
+        var out_declick = declick_level;
+
+        if (has_stats == 1) {
+            if (str_equals(noise_level, "Auto") == 1) {
+                if (input_thresh_cdb > -2000) {
+                    out_noise = "Leve";
+                } else {
+                    out_noise = "Off";
+                }
+            }
+            if (str_equals(declip_level, "Auto") == 1) {
+                if (input_tp_cdb >= -10) {
+                    out_declip = "Leve";
+                } else {
+                    out_declip = "Off";
+                }
+            }
+            if (str_equals(declick_level, "Auto") == 1) {
+                if (input_tp_cdb >= -5) {
+                    out_declick = "Leve";
+                } else {
+                    out_declick = "Off";
+                }
+            }
+        }
+
+        set_ok3(out_noise, out_declip, out_declick);
+    } catch (err) {
+        set_err1("invalid_resolve_repair_levels_payload");
+    }
+}
+
+func handle_evaluate_mix() {
+    try {
+        var input_i_cdb = 0;
+        var input_tp_cdb = 0;
+        var input_lra_cdb = 0;
+        var offset_cdb = 0;
+        var target_lufs_cdb = 0;
+        var true_peak_cdb = 0;
+        input(int) input_i_cdb;
+        input(int) input_tp_cdb;
+        input(int) input_lra_cdb;
+        input(int) offset_cdb;
+        input(int) target_lufs_cdb;
+        input(int) true_peak_cdb;
+
+        var score = 100;
+        var delta_cdb = input_i_cdb - target_lufs_cdb;
+
+        if (delta_cdb < -300) {
+            score = score - 20;
+        } else {
+            if (delta_cdb < -100) {
+                score = score - 10;
+            } else {
+                if (delta_cdb > 100) {
+                    score = score - 15;
+                }
+            }
+        }
+
+        if (input_tp_cdb >= true_peak_cdb) {
+            score = score - 25;
+        } else {
+            if (input_tp_cdb >= (true_peak_cdb - 100)) {
+                score = score - 10;
+            }
+        }
+
+        if (input_lra_cdb > 1000) {
+            score = score - 10;
+        } else {
+            if (input_lra_cdb < 400) {
+                score = score - 5;
+            }
+        }
+
+        if (offset_cdb < 0) {
+            if ((0 - offset_cdb) > 300) {
+                score = score - 10;
+            }
+        } else {
+            if (offset_cdb > 300) {
+                score = score - 10;
+            }
+        }
+
+        var rating = "";
+        if (score >= 85) {
+            rating = "Bueno";
+        } else {
+            if (score >= 65) {
+                rating = "Aceptable";
+            } else {
+                rating = "Necesita trabajo";
+            }
+        }
+
+        var advice = "Revisar balance de loudness, true peak y dinámica.";
+        if (score >= 85) { advice = "Sin recomendaciones específicas; parece estar bien balanceado."; }
+        if (score < 65) { advice = "Necesita ajustes de ganancia, dinámica y limitación."; }
+
+        set_ok2(rating, advice);
+    } catch (err) {
+        set_err1("invalid_evaluate_mix_payload");
+    }
+}
+
+func print_advice_line(prefix, text, first) {
+    if (first == 1) {
+        print prefix, text;
+    } else {
+        print "            ", text;
+    }
+}
+
+func handle_format_analysis_summary() {
+    try {
+        var label = "";
+        var input_i_str = "";
+        var input_tp_str = "";
+        var input_lra_str = "";
+        var input_i_cdb = 0;
+        var input_tp_cdb = 0;
+        var input_lra_cdb = 0;
+        var offset_cdb = 0;
+        var target_lufs_cdb = 0;
+        var true_peak_cdb = 0;
+        var voice_flag = 0;
+        var voice_rms_str = "";
+        var band_subbass = "";
+        var band_bass = "";
+        var band_low_mid = "";
+        var band_mid = "";
+        var band_high_mid = "";
+        var band_air = "";
+        var has_bands = 0;
+        input(str) label;
+        input(str) input_i_str;
+        input(str) input_tp_str;
+        input(str) input_lra_str;
+        input(int) input_i_cdb;
+        input(int) input_tp_cdb;
+        input(int) input_lra_cdb;
+        input(int) offset_cdb;
+        input(int) target_lufs_cdb;
+        input(int) true_peak_cdb;
+        input(int) voice_flag;
+        input(str) voice_rms_str;
+        input(str) band_subbass;
+        input(str) band_bass;
+        input(str) band_low_mid;
+        input(str) band_mid;
+        input(str) band_high_mid;
+        input(str) band_air;
+
+        var score = 100;
+        var delta_cdb = input_i_cdb - target_lufs_cdb;
+        var has_advice = 0;
+        var advice_count = 0;
+        var advice_1 = "";
+        var advice_2 = "";
+        var advice_3 = "";
+        var advice_4 = "";
+
+        if (delta_cdb < -300) {
+            advice_1 = "Muy bajo respecto al objetivo: considera aumentar ganancia o compresión.";
+            advice_count = 1;
+            has_advice = 1;
+            score = score - 20;
+        } else {
+            if (delta_cdb < -100) {
+                advice_1 = "Bajo: subir leve ganancia o aplicar make-up after compression.";
+                advice_count = 1;
+                has_advice = 1;
+                score = score - 10;
+            } else {
+                if (delta_cdb > 100) {
+                    advice_1 = "Por encima del objetivo: reduce ganancia o aplica un normalizador previo.";
+                    advice_count = 1;
+                    has_advice = 1;
+                    score = score - 15;
+                }
+            }
+        }
+
+        if (input_tp_cdb >= true_peak_cdb) {
+            if (advice_count == 0) { advice_1 = "True peak excede o iguala el límite: usar limitador/trimming para evitar clipping."; }
+            if (advice_count == 1) { advice_2 = "True peak excede o iguala el límite: usar limitador/trimming para evitar clipping."; }
+            if (advice_count == 2) { advice_3 = "True peak excede o iguala el límite: usar limitador/trimming para evitar clipping."; }
+            if (advice_count == 3) { advice_4 = "True peak excede o iguala el límite: usar limitador/trimming para evitar clipping."; }
+            advice_count = advice_count + 1;
+            has_advice = 1;
+            score = score - 25;
+        } else {
+            if (input_tp_cdb >= (true_peak_cdb - 100)) {
+                if (advice_count == 0) { advice_1 = "True peak cercano al límite: revisar transientes y aplicar limitador suave."; }
+                if (advice_count == 1) { advice_2 = "True peak cercano al límite: revisar transientes y aplicar limitador suave."; }
+                if (advice_count == 2) { advice_3 = "True peak cercano al límite: revisar transientes y aplicar limitador suave."; }
+                if (advice_count == 3) { advice_4 = "True peak cercano al límite: revisar transientes y aplicar limitador suave."; }
+                advice_count = advice_count + 1;
+                has_advice = 1;
+                score = score - 10;
+            }
+        }
+
+        if (input_lra_cdb > 1000) {
+            if (advice_count == 0) { advice_1 = "LRA alto: la mezcla tiene dinámicas amplias; considera compresión multibanda o automatizaciones."; }
+            if (advice_count == 1) { advice_2 = "LRA alto: la mezcla tiene dinámicas amplias; considera compresión multibanda o automatizaciones."; }
+            if (advice_count == 2) { advice_3 = "LRA alto: la mezcla tiene dinámicas amplias; considera compresión multibanda o automatizaciones."; }
+            if (advice_count == 3) { advice_4 = "LRA alto: la mezcla tiene dinámicas amplias; considera compresión multibanda o automatizaciones."; }
+            advice_count = advice_count + 1;
+            has_advice = 1;
+            score = score - 10;
+        } else {
+            if (input_lra_cdb < 400) {
+                if (advice_count == 0) { advice_1 = "LRA bajo: la mezcla está muy comprimida; verifica si falta dinámica."; }
+                if (advice_count == 1) { advice_2 = "LRA bajo: la mezcla está muy comprimida; verifica si falta dinámica."; }
+                if (advice_count == 2) { advice_3 = "LRA bajo: la mezcla está muy comprimida; verifica si falta dinámica."; }
+                if (advice_count == 3) { advice_4 = "LRA bajo: la mezcla está muy comprimida; verifica si falta dinámica."; }
+                advice_count = advice_count + 1;
+                has_advice = 1;
+                score = score - 5;
+            }
+        }
+
+        if ((0 - offset_cdb) > 300) {
+            if (offset_cdb < 0) {
+                if (advice_count == 0) { advice_1 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 1) { advice_2 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 2) { advice_3 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 3) { advice_4 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                advice_count = advice_count + 1;
+                has_advice = 1;
+                score = score - 10;
+            }
+        } else {
+            if (offset_cdb > 300) {
+                if (advice_count == 0) { advice_1 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 1) { advice_2 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 2) { advice_3 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                if (advice_count == 3) { advice_4 = "Offset recomendado grande: puede necesitar procesamiento significativo; revisar ganancia/processing chain."; }
+                advice_count = advice_count + 1;
+                has_advice = 1;
+                score = score - 10;
+            }
+        }
+
+        var rating = "";
+        if (score >= 85) {
+            rating = "Bueno";
+        } else {
+            if (score >= 65) {
+                rating = "Aceptable";
+            } else {
+                rating = "Necesita trabajo";
+            }
+        }
+
+        print "OK";
+        print label, ":";
+        print "  Input I (LUFS): ", input_i_str;
+        print "  Input TP (dBTP): ", input_tp_str;
+        print "  Input LRA (LU): ", input_lra_str;
+        if (voice_flag == 1) {
+            print "  Voz (300-3k Hz): ", voice_rms_str, " dB";
+        }
+        if (str_len(band_subbass) > 0) { has_bands = 1; }
+        if (str_len(band_bass) > 0) { has_bands = 1; }
+        if (str_len(band_low_mid) > 0) { has_bands = 1; }
+        if (str_len(band_mid) > 0) { has_bands = 1; }
+        if (str_len(band_high_mid) > 0) { has_bands = 1; }
+        if (str_len(band_air) > 0) { has_bands = 1; }
+        if (has_bands == 1) {
+            print "  Bandas (RMS dB):";
+            if (str_len(band_subbass) > 0) { print "    Subbass (20-60 Hz): ", band_subbass; }
+            if (str_len(band_bass) > 0) { print "    Bass (60-250 Hz): ", band_bass; }
+            if (str_len(band_low_mid) > 0) { print "    Low-Mid (250-500 Hz): ", band_low_mid; }
+            if (str_len(band_mid) > 0) { print "    Mid (500-2k Hz): ", band_mid; }
+            if (str_len(band_high_mid) > 0) { print "    High-Mid (2k-6k Hz): ", band_high_mid; }
+            if (str_len(band_air) > 0) { print "    Air (6k-16k Hz): ", band_air; }
+        }
+        print "  Evaluación: ", rating;
+        if (has_advice == 0) {
+            print "  Consejos: Sin recomendaciones específicas; parece estar bien balanceado.";
+        } else {
+            print_advice_line("  Consejos: ", advice_1, 1);
+            if (str_len(advice_2) > 0) { print_advice_line("  Consejos: ", advice_2, 0); }
+            if (str_len(advice_3) > 0) { print_advice_line("  Consejos: ", advice_3, 0); }
+            if (str_len(advice_4) > 0) { print_advice_line("  Consejos: ", advice_4, 0); }
+        }
+        direct_done = 1;
+        handled = 1;
+    } catch (err) {
+        set_err1("invalid_format_analysis_summary_payload");
+    }
+}
+
+func handle_build_preprocess_chain() {
+    try {
+        var mix_enabled = 1;
+        var autogain_enabled = 1;
+        var stereo_width_enabled = 0;
+        var deesser_enabled = 0;
+        var saturation_enabled = 0;
+        var saturation_per_band = 0;
+        var glue_enabled = 0;
+        var _drop = "";
+
+        input(int) mix_enabled;
+        input(int) autogain_enabled;
+        input(int) stereo_width_enabled;
+        input(str) _drop;
+        input(int) deesser_enabled;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(int) saturation_enabled;
+        input(int) saturation_per_band;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(int) glue_enabled;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+        input(str) _drop;
+
+        var chain = "";
+        var out_label = "hr";
+        if (autogain_enabled == 1) {
+            chain = "[0:a]volume=-17.0dB[hr];[hr]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+            out_label = "agfinal";
+        } else {
+            chain = "[0:a]volume=-17.0dB[hr]";
+        }
+
+        if (mix_enabled == 1) {
+            if (autogain_enabled == 1) {
+                chain = "[0:a]volume=-17.0dB[hr];[hr]equalizer=f=1000:g=0.10[mx1];[mx1]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                out_label = "agfinal";
+            } else {
+                chain = "[0:a]volume=-17.0dB[hr];[hr]equalizer=f=1000:g=0.10[mx1]";
+                out_label = "mx1";
+            }
+            if (deesser_enabled == 1) {
+                if (autogain_enabled == 1) {
+                    chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]equalizer=f=1000:g=0.10[mx2];[mx2]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                    out_label = "agfinal";
+                } else {
+                    chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]equalizer=f=1000:g=0.10[mx2]";
+                    out_label = "mx2";
+                }
+            }
+
+            if (saturation_enabled == 1) {
+                if (saturation_per_band == 0) {
+                    if (autogain_enabled == 1) {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]asoftclip=type=tanh:threshold=1:output=1[mx1];[mx1]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                        out_label = "agfinal";
+                    } else {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]asoftclip=type=tanh:threshold=1:output=1[mx1]";
+                        out_label = "mx1";
+                    }
+                    if (deesser_enabled == 1) {
+                        if (autogain_enabled == 1) {
+                            chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]asoftclip=type=tanh:threshold=1:output=1[mx2];[mx2]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                            out_label = "agfinal";
+                        } else {
+                            chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]asoftclip=type=tanh:threshold=1:output=1[mx2]";
+                            out_label = "mx2";
+                        }
+                    }
+                    if (glue_enabled == 1) {
+                        if (autogain_enabled == 1) {
+                            chain = "[0:a]volume=-17.0dB[hr];[hr]asoftclip=type=tanh:threshold=1:output=1[mx1];[mx1]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx2];[mx2]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                            out_label = "agfinal";
+                        } else {
+                            chain = "[0:a]volume=-17.0dB[hr];[hr]asoftclip=type=tanh:threshold=1:output=1[mx1];[mx1]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx2]";
+                            out_label = "mx2";
+                        }
+                    }
+                }
+            }
+
+            if (glue_enabled == 1) {
+                if (saturation_enabled == 0) {
+                    if (autogain_enabled == 1) {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx1];[mx1]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                        out_label = "agfinal";
+                    } else {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx1]";
+                        out_label = "mx1";
+                    }
+                }
+                if (deesser_enabled == 1) {
+                    if (autogain_enabled == 1) {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx2];[mx2]dynaudnorm=peak=0.708:maxgain=1.35:targetrms=0:gausssize=31[agfinal]";
+                        out_label = "agfinal";
+                    } else {
+                        chain = "[0:a]volume=-17.0dB[hr];[hr]deesser=i=0.62:m=0.5:f=0.30:s=0.62[mx1];[mx1]acompressor=threshold=-18.0dB:ratio=1.40:attack=20:release=120:makeup=1.0[mx2]";
+                        out_label = "mx2";
+                    }
+                }
+            }
+        }
+
+        set_ok2(chain, out_label);
+    } catch (err) {
+        set_err1("invalid_build_preprocess_chain_payload");
+    }
+}
+
+clear_output();
+input(str) method;
+method = str_trim(method);
+
+// Dispatch con select/case
+var selector = 0;
+if (str_equals(method, "health") == 1) { selector = 1; }
+if (str_equals(method, "ensure_output_path") == 1) { selector = 2; }
+if (str_equals(method, "resolve_repair_levels") == 1) { selector = 3; }
+if (str_equals(method, "evaluate_mix") == 1) { selector = 4; }
+if (str_equals(method, "format_analysis_summary") == 1) { selector = 5; }
+if (str_equals(method, "build_preprocess_chain") == 1) { selector = 6; }
+
+select (selector) {
+    case 1 {
+        handle_health();
+    }
+    case 2 {
+        handle_ensure_output_path();
+    }
+    case 3 {
+        handle_resolve_repair_levels();
+    }
+    case 4 {
+        handle_evaluate_mix();
+    }
+    case 5 {
+        handle_format_analysis_summary();
+    }
+    case 6 {
+        handle_build_preprocess_chain();
+    }
+    default {
+        set_err1("method_not_supported");
+    }
+}
+
+// Output: imprime status + slots poblados
+// Usa lleno() para decidir si imprimir en vez de str_len > 0
+if (direct_done == 0) {
+    print status;
+    print out1;
+    if (str_equals(method, "ensure_output_path") == 1) {
+        if (lleno(2) == 1) {
+            if (str_equals(out2, "0") == 1) {
+                print out2;
+            } else {
+                print out2;
+                if (lleno(3) == 1) { print out3; }
+            }
+        }
+    } else {
+        if (lleno(2) == 1) { print out2; }
+        if (lleno(3) == 1) { print out3; }
+    }
+}
+end;

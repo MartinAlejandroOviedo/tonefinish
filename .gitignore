@@ -8,13 +8,33 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+.codex
+log/
+pipe:*
 
 # Artefactos de audio de prueba
 *.wav
 
-# Script local
-packaging/build_all.sh
-
 # Releases locales
 releases/
-packaging/build_deb.sh
+
+# Directorios y repositorios generados por empaquetado
+.flatpak-builder/
+**/.flatpak-builder/
+packaging/build/
+packaging/build_rpm/
+packaging/build_flatpak/
+packaging/build_flatpak_repo/
+packaging/appimage/AppDir/
+
+# Paquetes generados
+*.deb
+*.rpm
+*.flatpak
+*.AppImage
+*.snap
+*.pkg.tar.zst
+*.tar.gz
+
+# Wheels flatpak locales
+packaging/flatpak/wheels/

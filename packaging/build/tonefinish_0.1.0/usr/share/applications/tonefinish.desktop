@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=ToneFinish
-Comment=Audio finisher con analisis y normalizacion
-Exec=tonefinish
-Icon=tonefinish
-Terminal=false
-Type=Application
-Categories=Audio;AudioVideo;

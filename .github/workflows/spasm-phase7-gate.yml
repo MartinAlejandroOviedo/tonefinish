@@ -1,0 +1,87 @@
+name: SpASM Phase7 Gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  phase7-gate-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Phase7 gate (adapter)
+        env:
+          FINISHER_SPASM_CLI: ./scripts/spasm_cli_adapter
+          FINISHER_LOGIC_BACKEND: spasm
+          FINISHER_SPASM_FALLBACK_PYTHON: "1"
+          FINISHER_SPASM_TIMEOUT_SEC: "600"
+        run: |
+          python3 scripts/spasm_phase7_gate.py --wav test_input.wav --runs 5 --cli ./scripts/spasm_cli_adapter
+
+      - name: Upload Phase7 report (adapter)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spasm-phase7-report-adapter
+          path: log/spasm_phase7_report.json
+          if-no-files-found: warn
+
+  phase7-gate-strict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Phase7 gate (strict)
+        env:
+          FINISHER_SPASM_CLI: ./scripts/finisher_spasm_cli
+          FINISHER_LOGIC_BACKEND: spasm
+          FINISHER_SPASM_FALLBACK_PYTHON: "0"
+          FINISHER_SPASM_TIMEOUT_SEC: "600"
+        run: |
+          python3 scripts/spasm_phase7_gate.py --wav test_input.wav --runs 5 --cli ./scripts/finisher_spasm_cli
+
+      - name: Upload Phase7 report (strict)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spasm-phase7-report-strict
+          path: log/spasm_phase7_report.json
+          if-no-files-found: warn

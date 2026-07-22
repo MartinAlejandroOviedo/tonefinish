@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from audio_analysis import (
+    analyze_audio as _py_analyze_audio,
+    analyze_audio_with_filter as _py_analyze_audio_with_filter,
+    analyze_eq_bands as _py_analyze_eq_bands,
+    analyze_voice_band as _py_analyze_voice_band,
+    evaluate_mix as _py_evaluate_mix,
+    format_analysis_summary as _py_format_analysis_summary,
+    write_analysis_toml as _py_write_analysis_toml,
+)
+from audio_processing import (
+    apply_output_gain as _py_apply_output_gain,
+    build_preprocess_chain as _py_build_preprocess_chain,
+    ensure_output_path as _py_ensure_output_path,
+    normalize_audio as _py_normalize_audio,
+    resolve_repair_levels as _py_resolve_repair_levels,
+)
+from auto_master_intelligence import (
+    adapt_preset_to_audio as _py_adapt_preset_to_audio,
+    analyze_audio_for_automaster as _py_analyze_audio_for_automaster,
+    analyze_batch_for_automaster as _py_analyze_batch_for_automaster,
+    update_saturation_budgets_for_batch as _py_update_saturation_budgets_for_batch,
+)
+
+
+def _from_wire(value: Any) -> Any:
+    if isinstance(value, dict):
+        tag = value.get("__type__")
+        if tag == "path":
+            return pathlib.Path(str(value.get("value", "")))
+        if tag == "tuple":
+            return tuple(_from_wire(v) for v in value.get("value", []))
+        return {k: _from_wire(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_from_wire(v) for v in value]
+    return value
+
+
+def _to_wire(value: Any) -> Any:
+    if isinstance(value, pathlib.Path):
+        return {"__type__": "path", "value": str(value)}
+    if isinstance(value, tuple):
+        return {"__type__": "tuple", "value": [_to_wire(v) for v in value]}
+    if isinstance(value, list):
+        return [_to_wire(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _to_wire(v) for k, v in value.items()}
+    return value
+
+
+def _emit(payload: dict[str, Any], code: int = 0) -> int:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    sys.stdout.write("\n")
+    return code
+
+
+def _bool(v: Any, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("1", "true", "yes", "on", "si", "sí"):
+            return True
+        if t in ("0", "false", "no", "off", ""):
+            return False
+    return bool(v)
+
+
+# ---------------------------------------------------------------------------
+# Method wrappers matching the CLI JSON wire format
+# ---------------------------------------------------------------------------
+
+def _wrap_analyze_audio(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (input_path, target_lufs, true_peak) -> (stats_dict, log_str)"""
+    a = list(args); kw = dict(kwargs)
+    input_path = a[0] if len(a) > 0 else kw.pop("input_path")
+    target_lufs = float(a[1] if len(a) > 1 else kw.pop("target_lufs", -14.0))
+    true_peak = float(a[2] if len(a) > 2 else kw.pop("true_peak", -1.0))
+    return _py_analyze_audio(input_path, target_lufs, true_peak, verbose=False, **kw)
+
+
+def _wrap_analyze_audio_with_filter(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (input_path, target_lufs, true_peak, filter_chain, filter_output) -> (stats_dict, log_str)"""
+    a = list(args); kw = dict(kwargs)
+    input_path = a[0] if len(a) > 0 else kw.pop("input_path")
+    target_lufs = float(a[1] if len(a) > 1 else kw.pop("target_lufs", -14.0))
+    true_peak = float(a[2] if len(a) > 2 else kw.pop("true_peak", -1.0))
+    filter_chain = str(a[3] if len(a) > 3 else kw.pop("filter_chain", ""))
+    filter_output = str(a[4] if len(a) > 4 else kw.pop("filter_output", ""))
+    return _py_analyze_audio_with_filter(input_path, target_lufs, true_peak, filter_chain, filter_output, verbose=False, **kw)
+
+
+def _wrap_analyze_voice_band(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (input_path) -> float | None"""
+    a = list(args); kw = dict(kwargs)
+    input_path = a[0] if len(a) > 0 else kw.pop("input_path")
+    return _py_analyze_voice_band(input_path, verbose=False)
+
+
+def _wrap_evaluate_mix(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (stats, target_lufs, true_peak) -> [rating_str, advice_str]"""
+    a = list(args); kw = dict(kwargs)
+    stats = a[0] if len(a) > 0 and isinstance(a[0], dict) else {}
+    target_lufs = float(a[1] if len(a) > 1 else kw.pop("target_lufs", -14.0))
+    true_peak = float(a[2] if len(a) > 2 else kw.pop("true_peak", -1.0))
+    rating, advice = _py_evaluate_mix(stats, target_lufs, true_peak)
+    return [rating, advice]
+
+
+def _wrap_resolve_repair_levels(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (stats, noise_level, declip_level, declick_level) -> [noise_str, declip_str, declick_str]"""
+    a = list(args); kw = dict(kwargs)
+    stats = a[0] if len(a) > 0 else None
+    noise_level = str(a[1] if len(a) > 1 else kw.pop("noise_level", "Off"))
+    declip_level = str(a[2] if len(a) > 2 else kw.pop("declip_level", "Off"))
+    declick_level = str(a[3] if len(a) > 3 else kw.pop("declick_level", "Off"))
+    result = _py_resolve_repair_levels(stats, noise_level, declip_level, declick_level)
+    return list(result)
+
+
+def _wrap_build_preprocess_chain(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (all kwargs) -> (chain_str, output_label_str)
+    Translates CLI kwargs to Python build_preprocess_chain signature."""
+    kw = {k: v for k, v in kwargs.items()}
+    a = list(args)
+    if a and isinstance(a[0], dict):
+        for k, v in a[0].items():
+            if k not in kw:
+                kw[k] = v
+
+    input_path = kw.pop("input_path", pathlib.Path("."))
+    band_stats = kw.pop("band_stats", None)
+    dynamic_eq = _bool(kw.pop("dynamic_eq", False))
+    stereo_width = _bool(kw.pop("stereo_width", False))
+    deesser = _bool(kw.pop("deesser", False))
+
+    try:
+        result = _py_build_preprocess_chain(
+            input_path=input_path,
+            band_stats=band_stats,
+            dynamic_eq=dynamic_eq,
+            stereo_width=stereo_width,
+            deesser=deesser,
+            deesser_freq_hz=float(kw.get("deesser_freq_hz", 6000.0)),
+            deesser_intensity=float(kw.get("deesser_intensity", 1.0)),
+            noise_reduction_level=str(kw.get("noise_reduction_level", "Off")),
+            declip_level=str(kw.get("declip_level", "Off")),
+            declick_level=str(kw.get("declick_level", "Off")),
+            tone_low_db=float(kw.get("tone_low_db", 0.0)),
+            sub_bass_db=float(kw.get("sub_bass_db", 0.0)),
+            tone_mid_db=float(kw.get("tone_mid_db", 0.0)),
+            tone_high_db=float(kw.get("tone_high_db", 0.0)),
+            tone_tilt_db=float(kw.get("tone_tilt_db", 0.0)),
+            headroom_db=float(kw.get("headroom_db", -17.0)),
+            saturation_enabled=_bool(kw.get("saturation_enabled", False)),
+            saturation_per_band=_bool(kw.get("saturation_per_band", False)),
+            saturation_drive_db=float(kw.get("saturation_drive_db", 0.0)),
+            saturation_mix=float(kw.get("saturation_mix", 0.0)),
+            saturation_type=str(kw.get("saturation_type", "Tape")),
+            glue_enabled=_bool(kw.get("glue_enabled", False)),
+            glue_threshold_db=float(kw.get("glue_threshold_db", -18.0)),
+            glue_ratio=float(kw.get("glue_ratio", 1.4)),
+            glue_attack_ms=float(kw.get("glue_attack_ms", 20.0)),
+            glue_release_ms=float(kw.get("glue_release_ms", 120.0)),
+            glue_makeup_db=float(kw.get("glue_makeup_db", 0.0)),
+            autogain_maxgain=float(kw.get("autogain_maxgain", 2.0)),
+        )
+    except TypeError as e:
+        chain, out_label = _py_build_preprocess_chain(
+            input_path, band_stats, dynamic_eq, stereo_width,
+            deesser=deesser,
+            deesser_freq_hz=float(kw.get("deesser_freq_hz", 6000.0)),
+            deesser_intensity=float(kw.get("deesser_intensity", 1.0)),
+        )
+        result = (chain, out_label)
+    return result
+
+
+def _wrap_normalize_audio(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (input_path, output_path, stats, target_lufs, true_peak, overwrite, verbose, ...kwargs) -> str"""
+    a = list(args); kw = dict(kwargs)
+    input_path = a[0] if len(a) > 0 else kw.pop("input_path")
+    output_path = a[1] if len(a) > 1 else kw.pop("output_path")
+    stats = a[2] if len(a) > 2 else kw.pop("stats", {})
+    target_lufs = float(a[3] if len(a) > 3 else kw.pop("target_lufs", -14.0))
+    true_peak = float(a[4] if len(a) > 4 else kw.pop("true_peak", -1.0))
+    overwrite = _bool(a[5] if len(a) > 5 else kw.pop("overwrite", False))
+    verbose = _bool(a[6] if len(a) > 6 else kw.pop("verbose", False))
+
+    dynamic_eq = _bool(kw.pop("dynamic_eq", False))
+    band_stats = kw.pop("band_stats", None)
+    master_enabled = _bool(kw.pop("master_enabled", kw.pop("master_limiter_enabled", False)))
+    mix_enabled = _bool(kw.pop("mix_enabled", True))
+    autogain_enabled = _bool(kw.pop("autogain_enabled", True))
+    headroom_db = float(kw.pop("headroom_db", -17.0))
+    stereo_width_conf = _bool(kw.pop("stereo_width", False))
+
+    deesser_enabled = _bool(kw.pop("deesser", False))
+    noise_level = str(kw.pop("noise_reduction_level", kw.pop("noise_level", "Off")))
+    declip_level = str(kw.pop("declip_level", "Off"))
+    declick_level = str(kw.pop("declick_level", "Off"))
+    saturation_enabled = _bool(kw.pop("saturation_enabled", False))
+    saturation_per_band = _bool(kw.pop("saturation_per_band", False))
+    glue_enabled = _bool(kw.pop("glue_enabled", False))
+    fade_in = kw.pop("fade_in", 0.0)
+    fade_out = kw.pop("fade_out", 0.0)
+    output_sr = kw.pop("output_sr", None)
+    output_bit_depth = kw.pop("output_bit_depth", None)
+    output_format = kw.pop("output_format", None)
+    metadata = kw.pop("metadata", None)
+
+    return _py_normalize_audio(
+        input_path, output_path, stats, target_lufs, true_peak, overwrite, verbose,
+        dynamic_eq=dynamic_eq,
+        band_stats=band_stats,
+        master_limiter_enabled=master_enabled,
+        stereo_width=stereo_width_conf,
+        deesser=deesser_enabled,
+        headroom_db=headroom_db,
+        noise_level=noise_level,
+        declip_level=declip_level,
+        declick_level=declick_level,
+        saturation_enabled=saturation_enabled,
+        saturation_per_band=saturation_per_band,
+        glue_enabled=glue_enabled,
+        fade_in=fade_in,
+        fade_out=fade_out,
+        output_sr=output_sr,
+        output_bit_depth=output_bit_depth,
+        output_format=output_format,
+        metadata=metadata,
+        **{k: v for k, v in kw.items() if k in {
+            "saturation_drive_db", "saturation_mix", "saturation_type",
+            "glue_threshold_db", "glue_ratio", "glue_attack_ms",
+            "glue_release_ms", "glue_knee_db", "glue_makeup_db", "autogain_maxgain",
+            "tone_low_db", "sub_bass_db", "tone_mid_db", "tone_high_db",
+            "tone_tilt_db", "deesser_freq_hz", "deesser_intensity",
+        }},
+    )
+
+
+def _wrap_analyze_audio_for_automaster(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (input_path, target_lufs, true_peak) -> (chars_dict, reco_list, spec_dict)"""
+    a = list(args); kw = dict(kwargs)
+    input_path = a[0] if len(a) > 0 else kw.pop("input_path")
+    verbose = _bool(kw.pop("verbose", False))
+    chars, recos, spec = _py_analyze_audio_for_automaster(input_path, verbose=verbose, use_spectrum=True, full_analysis=True)
+    return tuple([chars.__dict__ if hasattr(chars, "__dict__") else vars(chars),
+                  list(recos),
+                  spec])
+
+
+def _wrap_analyze_batch_for_automaster(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (files, target_lufs, true_peak) -> (merged_chars_dict, reco_list, individual_results_dict)"""
+    a = list(args); kw = dict(kwargs)
+    files = a[0] if len(a) > 0 else kw.pop("files", [])
+    verbose = _bool(kw.pop("verbose", False))
+    chars, recos, ind_results = _py_analyze_batch_for_automaster(files, verbose=verbose, use_spectrum=False)
+    return tuple([chars.__dict__ if hasattr(chars, "__dict__") else vars(chars),
+                  list(recos),
+                  ind_results])
+
+
+def _wrap_adapt_preset_to_audio(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (preset_dict, characteristics_dict) -> adjusted_preset_dict"""
+    a = list(args); kw = dict(kwargs)
+    preset = a[0] if len(a) > 0 else kw.pop("preset", {})
+    characteristics = a[1] if len(a) > 1 else kw.pop("characteristics", {})
+    if isinstance(preset, dict):
+        preset_name = str(preset.get("name", preset.get("preset", "balanced")))
+    else:
+        preset_name = str(preset)
+    if isinstance(characteristics, dict):
+        from auto_master_intelligence import AudioCharacteristics
+        chars_obj = AudioCharacteristics(**characteristics)
+    else:
+        chars_obj = characteristics
+    return _py_adapt_preset_to_audio(preset_name, chars_obj)
+
+
+def _wrap_update_saturation_budgets_for_batch(*args: Any, **kwargs: Any) -> Any:
+    """CLI: (batch_data_dict) -> updated_batch_dict"""
+    a = list(args); kw = dict(kwargs)
+    batch_data = a[0] if len(a) > 0 else kw.pop("batch_data", {})
+    individual_results = batch_data.get("individual_results", {})
+    adjustments = batch_data.get("adjustments", {})
+    return _py_update_saturation_budgets_for_batch(individual_results, adjustments)
+
+
+METHODS = {
+    "analyze_audio": _wrap_analyze_audio,
+    "analyze_audio_with_filter": _wrap_analyze_audio_with_filter,
+    "analyze_eq_bands": _py_analyze_eq_bands,
+    "analyze_voice_band": _wrap_analyze_voice_band,
+    "evaluate_mix": _wrap_evaluate_mix,
+    "format_analysis_summary": _py_format_analysis_summary,
+    "write_analysis_toml": _py_write_analysis_toml,
+    "apply_output_gain": _py_apply_output_gain,
+    "build_preprocess_chain": _wrap_build_preprocess_chain,
+    "ensure_output_path": _py_ensure_output_path,
+    "normalize_audio": _wrap_normalize_audio,
+    "resolve_repair_levels": _wrap_resolve_repair_levels,
+    "analyze_audio_for_automaster": _wrap_analyze_audio_for_automaster,
+    "analyze_batch_for_automaster": _wrap_analyze_batch_for_automaster,
+    "adapt_preset_to_audio": _wrap_adapt_preset_to_audio,
+    "update_saturation_budgets_for_batch": _wrap_update_saturation_budgets_for_batch,
+}
+
+
+def _handle_call_json() -> int:
+    raw = sys.stdin.read()
+    if not raw.strip():
+        return _emit({"ok": False, "error": "stdin vacío"}, 1)
+
+    try:
+        req = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _emit({"ok": False, "error": f"JSON inválido: {exc}"}, 1)
+
+    method = req.get("method")
+    args = req.get("args", [])
+    kwargs = req.get("kwargs", {})
+
+    if method not in METHODS:
+        return _emit({"ok": False, "error": f"método no soportado: {method}"}, 1)
+
+    try:
+        fn = METHODS[method]
+        decoded_args = [_from_wire(v) for v in args]
+        decoded_kwargs = {k: _from_wire(v) for k, v in kwargs.items()}
+        result = fn(*decoded_args, **decoded_kwargs)
+        return _emit({"ok": True, "result": _to_wire(result)}, 0)
+    except Exception as exc:
+        return _emit({"ok": False, "error": str(exc)}, 1)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Adapter CLI para backend lógico Finisher")
+    sub = parser.add_subparsers(dest="cmd")
+    call = sub.add_parser("call")
+    call.add_argument("--json", action="store_true", help="Lee request JSON por stdin y devuelve JSON por stdout")
+    args = parser.parse_args()
+
+    if args.cmd == "call" and args.json:
+        return _handle_call_json()
+
+    parser.print_help(sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

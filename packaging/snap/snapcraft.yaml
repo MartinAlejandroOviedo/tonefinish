@@ -28,7 +28,7 @@ parts:
       config.py: usr/lib/tonefinish/config.py
       ui_app.py: usr/lib/tonefinish/ui_app.py
       main.py: usr/lib/tonefinish/main.py
-      normalize_audio.py: usr/lib/tonefinish/normalize_audio.py
+      ui/: usr/lib/tonefinish/ui/
       requirements.txt: usr/lib/tonefinish/requirements.txt
       VERSION: usr/lib/tonefinish/VERSION
       README.md: usr/lib/tonefinish/README.md

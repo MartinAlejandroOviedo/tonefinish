@@ -1,0 +1,343 @@
+{
+  "schema_version": "1.0",
+  "catalog_fingerprint": "sha256:f0464a7e944b65a85d7de2df80613fd91035f1091e36a2a0f5d188c731f658a7",
+  "functions_total": 36,
+  "implemented_total": 36,
+  "status": "passed",
+  "functions": [
+    {
+      "function_id": "audio.repair.denoise",
+      "plugin_id": "audio.repair",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "noise_floor_db"
+      ]
+    },
+    {
+      "function_id": "audio.repair.declip",
+      "plugin_id": "audio.repair",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "clipping",
+        "true_peak"
+      ]
+    },
+    {
+      "function_id": "audio.repair.declick",
+      "plugin_id": "audio.repair",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "impulsive_noise"
+      ]
+    },
+    {
+      "function_id": "audio.repair.pink_noise_compensation",
+      "plugin_id": "audio.repair",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "spectrum"
+      ]
+    },
+    {
+      "function_id": "audio.repair.trim_silence",
+      "plugin_id": "audio.repair",
+      "implemented": true,
+      "parameter_count": 4,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.tone_eq.high_pass",
+      "plugin_id": "audio.tone_eq",
+      "implemented": true,
+      "parameter_count": 2,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.tone_eq.low_pass",
+      "plugin_id": "audio.tone_eq",
+      "implemented": true,
+      "parameter_count": 2,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.tone_eq.band",
+      "plugin_id": "audio.tone_eq",
+      "implemented": true,
+      "parameter_count": 4,
+      "requires_analysis": [
+        "spectrum",
+        "band_rms"
+      ]
+    },
+    {
+      "function_id": "audio.tone_eq.tilt",
+      "plugin_id": "audio.tone_eq",
+      "implemented": true,
+      "parameter_count": 2,
+      "requires_analysis": [
+        "spectrum"
+      ]
+    },
+    {
+      "function_id": "audio.dynamic_eq.resonance",
+      "plugin_id": "audio.dynamic_eq",
+      "implemented": true,
+      "parameter_count": 9,
+      "requires_analysis": [
+        "spectrum",
+        "band_rms"
+      ]
+    },
+    {
+      "function_id": "audio.dynamic_eq.motion",
+      "plugin_id": "audio.dynamic_eq",
+      "implemented": true,
+      "parameter_count": 9,
+      "requires_analysis": [
+        "spectrum",
+        "band_rms"
+      ]
+    },
+    {
+      "function_id": "audio.vocal.resonance_suppressor",
+      "plugin_id": "audio.vocal",
+      "implemented": true,
+      "parameter_count": 8,
+      "requires_analysis": [
+        "vocal_center",
+        "spectrum"
+      ]
+    },
+    {
+      "function_id": "audio.vocal.center_naturalizer",
+      "plugin_id": "audio.vocal",
+      "implemented": true,
+      "parameter_count": 7,
+      "requires_analysis": [
+        "vocal_center",
+        "spectrum"
+      ]
+    },
+    {
+      "function_id": "audio.transient.dynamic_control",
+      "plugin_id": "audio.transient",
+      "implemented": true,
+      "parameter_count": 4,
+      "requires_analysis": [
+        "transient_crest_db"
+      ]
+    },
+    {
+      "function_id": "audio.stereo.correlation_guard",
+      "plugin_id": "audio.stereo_guard",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "stereo_correlation"
+      ]
+    },
+    {
+      "function_id": "audio.low_end.dynamic_balance",
+      "plugin_id": "audio.low_end",
+      "implemented": true,
+      "parameter_count": 8,
+      "requires_analysis": [
+        "low_end_level_db",
+        "low_end_mid_ratio"
+      ]
+    },
+    {
+      "function_id": "audio.spectral.deharsh",
+      "plugin_id": "audio.spectral",
+      "implemented": true,
+      "parameter_count": 8,
+      "requires_analysis": [
+        "harshness_excess_db"
+      ]
+    },
+    {
+      "function_id": "audio.spectral.dullness_recovery",
+      "plugin_id": "audio.spectral",
+      "implemented": true,
+      "parameter_count": 8,
+      "requires_analysis": [
+        "dullness_deficit_db"
+      ]
+    },
+    {
+      "function_id": "audio.multiband.eq",
+      "plugin_id": "audio.multiband",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "band_rms"
+      ]
+    },
+    {
+      "function_id": "audio.multiband.stereo_width",
+      "plugin_id": "audio.multiband",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "stereo_width",
+        "band_rms"
+      ]
+    },
+    {
+      "function_id": "audio.multiband.compressor",
+      "plugin_id": "audio.multiband",
+      "implemented": true,
+      "parameter_count": 6,
+      "requires_analysis": [
+        "band_rms",
+        "band_peak",
+        "crest_factor"
+      ]
+    },
+    {
+      "function_id": "audio.multiband.limiter",
+      "plugin_id": "audio.multiband",
+      "implemented": true,
+      "parameter_count": 2,
+      "requires_analysis": [
+        "band_peak"
+      ]
+    },
+    {
+      "function_id": "audio.multiband.saturation",
+      "plugin_id": "audio.multiband",
+      "implemented": true,
+      "parameter_count": 3,
+      "requires_analysis": [
+        "band_rms",
+        "band_peak"
+      ]
+    },
+    {
+      "function_id": "audio.saturation.softclip",
+      "plugin_id": "audio.saturation",
+      "implemented": true,
+      "parameter_count": 4,
+      "requires_analysis": [
+        "lufs",
+        "true_peak",
+        "crest_factor"
+      ]
+    },
+    {
+      "function_id": "audio.saturation.exciter",
+      "plugin_id": "audio.saturation",
+      "implemented": true,
+      "parameter_count": 3,
+      "requires_analysis": [
+        "spectrum"
+      ]
+    },
+    {
+      "function_id": "audio.saturation.hard_clip",
+      "plugin_id": "audio.saturation",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.deesser.sibilance_reduction",
+      "plugin_id": "audio.deesser",
+      "implemented": true,
+      "parameter_count": 2,
+      "requires_analysis": [
+        "sibilance",
+        "sample_rate"
+      ]
+    },
+    {
+      "function_id": "audio.glue.bus_compressor",
+      "plugin_id": "audio.glue",
+      "implemented": true,
+      "parameter_count": 6,
+      "requires_analysis": [
+        "lufs",
+        "crest_factor",
+        "lra"
+      ]
+    },
+    {
+      "function_id": "audio.autogain.headroom",
+      "plugin_id": "audio.autogain",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "true_peak",
+        "lufs"
+      ]
+    },
+    {
+      "function_id": "audio.autogain.output_gain",
+      "plugin_id": "audio.autogain",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.autogain.interstage_limiter",
+      "plugin_id": "audio.autogain",
+      "implemented": true,
+      "parameter_count": 3,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.autogain.final_peak",
+      "plugin_id": "audio.autogain",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.loudness.normalize",
+      "plugin_id": "audio.loudness",
+      "implemented": true,
+      "parameter_count": 4,
+      "requires_analysis": [
+        "loudness_stats"
+      ]
+    },
+    {
+      "function_id": "audio.loudness.fade_in",
+      "plugin_id": "audio.loudness",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": []
+    },
+    {
+      "function_id": "audio.loudness.fade_out",
+      "plugin_id": "audio.loudness",
+      "implemented": true,
+      "parameter_count": 1,
+      "requires_analysis": [
+        "duration"
+      ]
+    },
+    {
+      "function_id": "audio.limiter.true_peak",
+      "plugin_id": "audio.master_limiter",
+      "implemented": true,
+      "parameter_count": 5,
+      "requires_analysis": [
+        "true_peak",
+        "sample_rate"
+      ]
+    }
+  ],
+  "acceptance": {
+    "signed_values": true,
+    "neutral_bypass": true,
+    "ffmpeg_execution": true,
+    "ab_integrity": true,
+    "invalid_ranges_rejected": true,
+    "unknown_ids_rejected": true
+  }
+}

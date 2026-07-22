@@ -1,0 +1,2197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SPASM_BIN="${FINISHER_SPASM_BIN:-}"
+if [[ -z "$SPASM_BIN" ]]; then
+  if command -v spasm >/dev/null 2>&1; then
+    SPASM_BIN="$(command -v spasm)"
+  elif [[ -x /usr/bin/spasm ]]; then
+    SPASM_BIN=/usr/bin/spasm
+  elif [[ -x /usr/local/bin/spasm ]]; then
+    SPASM_BIN=/usr/local/bin/spasm
+  elif [[ -x /home/martin/Documentos/SpASM/spasm ]]; then
+    # Compatibilidad exclusiva con el árbol de desarrollo local.
+    SPASM_BIN=/home/martin/Documentos/SpASM/spasm
+  else
+    echo '{"ok": false, "error": "runtime SpASM no encontrado; instale el paquete spasm o configure FINISHER_SPASM_BIN"}'
+    exit 1
+  fi
+fi
+# Los skills auxiliares de SpASM (incluido ffmpeg-spasm) consumen SPASM_BIN.
+# Exportarlo evita que cada subproceso vuelva al default inválido /usr/bin/spasm.
+export SPASM_BIN
+CORE_SCRIPT="$ROOT_DIR/spasm_cli/finisher_cli_core.spasm"
+FFMPEG_BIN="${FINISHER_FFMPEG_BIN:-}"
+if [[ -z "$FFMPEG_BIN" ]]; then
+  if command -v ffmpeg-spasm >/dev/null 2>&1; then
+    FFMPEG_BIN="$(command -v ffmpeg-spasm)"
+  else
+    FFMPEG_BIN="ffmpeg"
+  fi
+fi
+if [[ "$FFMPEG_BIN" == *"/ffmpeg.real-spasm-backup" || "$FFMPEG_BIN" == "ffmpeg.real-spasm-backup" ]]; then
+  if command -v ffmpeg-spasm >/dev/null 2>&1; then
+    FFMPEG_BIN="$(command -v ffmpeg-spasm)"
+  else
+    FFMPEG_BIN="/usr/bin/ffmpeg"
+  fi
+fi
+FFPROBE_BIN="${FINISHER_FFPROBE_BIN:-}"
+if [[ -z "$FFPROBE_BIN" ]]; then
+  if [[ "$(basename "$FFMPEG_BIN")" == "ffmpeg" ]]; then
+    ffmpeg_dir="$(dirname "$FFMPEG_BIN")"
+    if [[ -z "$ffmpeg_dir" || "$ffmpeg_dir" == "." ]]; then
+      FFPROBE_BIN="ffprobe"
+    else
+      FFPROBE_BIN="${ffmpeg_dir}/ffprobe"
+    fi
+  else
+    FFPROBE_BIN="ffprobe"
+  fi
+fi
+
+if [[ "${1:-}" != "call" || "${2:-}" != "--json" ]]; then
+  echo '{"ok": false, "error": "uso: finisher_spasm_cli call --json"}'
+  exit 2
+fi
+
+REQ="$(cat)"
+if [[ -z "${REQ// }" ]]; then
+  echo '{"ok": false, "error": "stdin vacío"}'
+  exit 1
+fi
+
+_spasm_err_reported=0
+_spasm_json_error() {
+  local msg="${1:-error_no_especificado}"
+  _spasm_err_reported=1
+  python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": sys.argv[1]}, ensure_ascii=False))' "$msg"
+}
+_spasm_err_trap() {
+  local ec=$?
+  if [[ "$ec" -ne 0 && "$_spasm_err_reported" -eq 0 ]]; then
+    _spasm_json_error "cli_unhandled_error(method=${METHOD:-unknown},line=${BASH_LINENO[0]:-0},code=${ec})"
+  fi
+  exit "$ec"
+}
+trap _spasm_err_trap ERR
+
+METHOD="$(python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("method",""))' <<<"$REQ" 2>/dev/null || true)"
+if [[ -z "$METHOD" ]]; then
+  echo '{"ok": false, "error": "request JSON inválido o sin method"}'
+  exit 1
+fi
+
+USER_STATE_BASE="${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}"
+DEFAULT_SPASM_STATE_BASE="${USER_STATE_BASE}/tonefinish/spasm"
+JOB_DIR="${FINISHER_SPASM_JOB_DIR:-$DEFAULT_SPASM_STATE_BASE/jobs}"
+RUNNER="$ROOT_DIR/scripts/spasm_batch_job_runner.py"
+STATE_DIR="${FINISHER_SPASM_STATE_DIR:-$DEFAULT_SPASM_STATE_BASE/state}"
+mkdir -p "$STATE_DIR" "$JOB_DIR"
+AUDIO_ACTIVE_FILE="$STATE_DIR/audio_active.count"
+LOW_ACTIVE_FILE="$STATE_DIR/low_active.count"
+
+_audio_active_count() {
+  python3 - <<'PY' "$AUDIO_ACTIVE_FILE"
+import os,sys
+path=sys.argv[1]
+try:
+    with open(path,"r",encoding="utf-8") as fh:
+        print(max(0,int((fh.read() or "0").strip())))
+except Exception:
+    print(0)
+PY
+}
+
+_audio_count_update() {
+  python3 - <<'PY' "$AUDIO_ACTIVE_FILE" "$1"
+import os,sys,fcntl
+path,delta=sys.argv[1],int(sys.argv[2])
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path,"a+",encoding="utf-8") as fh:
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    fh.seek(0)
+    raw=(fh.read() or "0").strip()
+    cur=int(raw) if raw else 0
+    nxt=max(0,cur+delta)
+    fh.seek(0); fh.truncate(0); fh.write(str(nxt)); fh.flush()
+    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+print(nxt)
+PY
+}
+
+_counter_read() {
+  python3 - <<'PY' "$1"
+import sys
+path=sys.argv[1]
+try:
+    with open(path,"r",encoding="utf-8") as fh:
+        print(max(0,int((fh.read() or "0").strip())))
+except Exception:
+    print(0)
+PY
+}
+
+_counter_update() {
+  python3 - <<'PY' "$1" "$2"
+import os,sys,fcntl
+path,delta=sys.argv[1],int(sys.argv[2])
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path,"a+",encoding="utf-8") as fh:
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    fh.seek(0)
+    raw=(fh.read() or "0").strip()
+    cur=int(raw) if raw else 0
+    nxt=max(0,cur+delta)
+    fh.seek(0); fh.truncate(0); fh.write(str(nxt)); fh.flush()
+    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+print(nxt)
+PY
+}
+
+_method_is_audio_priority() {
+  case "$1" in
+    normalize_audio|apply_output_gain|analyze_audio|analyze_audio_with_filter|build_preprocess_chain|analyze_eq_bands|analyze_voice_band)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_method_is_low_priority() {
+  case "$1" in
+    get_runtime_resource_info|get_processing_limits|batch_status|get_audio_info|fix_audio_tools)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_wait_if_audio_busy_for_low_priority() {
+  local timeout_ms="${FINISHER_SPASM_LOWPRIO_WAIT_MS:-2500}"
+  local step_ms=100
+  local waited=0
+  while true; do
+    local active
+    active="$(_audio_active_count)"
+    if [[ "${active:-0}" -le 0 ]]; then
+      break
+    fi
+    if [[ "$waited" -ge "$timeout_ms" ]]; then
+      break
+    fi
+    sleep 0.1
+    waited=$((waited + step_ms))
+  done
+}
+
+_acquire_low_slot() {
+  local max_low="${FINISHER_SPASM_MAX_LOWPRIO_INFLIGHT:-1}"
+  local timeout_ms="${FINISHER_SPASM_LOWPRIO_SLOT_WAIT_MS:-5000}"
+  local step_ms=100
+  local waited=0
+  while true; do
+    local active_low
+    active_low="$(_counter_read "$LOW_ACTIVE_FILE")"
+    if [[ "${active_low:-0}" -lt "$max_low" ]]; then
+      _counter_update "$LOW_ACTIVE_FILE" 1 >/dev/null
+      # Revalidar para evitar carrera: si nos pasamos, devolvemos y esperamos.
+      active_low="$(_counter_read "$LOW_ACTIVE_FILE")"
+      if [[ "${active_low:-0}" -le "$max_low" ]]; then
+        return 0
+      fi
+      _counter_update "$LOW_ACTIVE_FILE" -1 >/dev/null
+    fi
+    if [[ "$waited" -ge "$timeout_ms" ]]; then
+      # Degradar a best-effort: no bloquear indefinidamente.
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + step_ms))
+  done
+}
+
+if _method_is_audio_priority "$METHOD"; then
+  _audio_count_update 1 >/dev/null
+  trap '_audio_count_update -1 >/dev/null' EXIT
+elif _method_is_low_priority "$METHOD"; then
+  _wait_if_audio_busy_for_low_priority
+  _acquire_low_slot
+  trap '_counter_update "$LOW_ACTIVE_FILE" -1 >/dev/null' EXIT
+fi
+
+if [[ "$METHOD" == "batch_start" ]]; then
+  JOB_ID="job_$(date +%s)_$RANDOM"
+  mkdir -p "$JOB_DIR"
+  PAYLOAD_PATH="$JOB_DIR/${JOB_ID}.payload.json"
+  STATUS_PATH="$JOB_DIR/${JOB_ID}.status.json"
+  python3 - <<'PY' "$REQ" "$PAYLOAD_PATH"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+payload = a[0] if a and isinstance(a[0], dict) else {}
+with open(sys.argv[2], "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=False, indent=2)
+PY
+  python3 - <<'PY' "$JOB_ID" "$STATUS_PATH"
+import json,sys,time
+job_id=sys.argv[1]
+status_path=sys.argv[2]
+queued_at=time.time()
+status={
+  "job_id": job_id,
+  "state": "queued",
+  "progress": 0.0,
+  "message": "En cola",
+  "current": 0,
+  "total": 0,
+  "queued_at": queued_at,
+  "started_at": None,
+  "queue_wait_ms": None,
+  "updated_at": queued_at,
+  "result_message": None,
+  "results": None,
+  "error": None,
+}
+with open(status_path,"w",encoding="utf-8") as fh:
+    json.dump(status, fh, ensure_ascii=False, indent=2)
+PY
+  (
+    nohup python3 "$RUNNER" "$JOB_ID" "$PAYLOAD_PATH" "$STATUS_PATH" >/dev/null 2>&1 &
+  )
+  python3 - <<'PY' "$JOB_ID"
+import json,sys
+print(json.dumps({"ok": True, "result": {"job_id": sys.argv[1]}}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "batch_status" ]]; then
+  JOB_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("args",[]); print(a[0] if a else "")' <<<"$REQ" 2>/dev/null || true)"
+  if [[ -z "$JOB_ID" ]]; then
+    echo '{"ok": false, "error": "batch_status requiere job_id"}'
+    exit 1
+  fi
+  STATUS_PATH="$JOB_DIR/${JOB_ID}.status.json"
+  if [[ ! -f "$STATUS_PATH" ]]; then
+    PAYLOAD_PATH="$JOB_DIR/${JOB_ID}.payload.json"
+    if [[ -f "$PAYLOAD_PATH" ]]; then
+      python3 - <<'PY' "$JOB_ID"
+import json,sys,time
+print(json.dumps({
+  "ok": True,
+  "result": {
+    "job_id": sys.argv[1],
+    "state": "queued",
+    "progress": 0.0,
+    "message": "En cola",
+    "current": 0,
+    "total": 0,
+    "updated_at": time.time(),
+  }
+}, ensure_ascii=False))
+PY
+      exit 0
+    fi
+    echo '{"ok": false, "error": "job no encontrado"}'
+    exit 1
+  fi
+  python3 - <<'PY' "$STATUS_PATH"
+import json,sys,time
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    status = json.load(fh)
+now=time.time()
+updated_at=status.get("updated_at")
+if isinstance(updated_at,(int,float)):
+    status["status_age_ms"]=max(0,int((now-float(updated_at))*1000))
+else:
+    status["status_age_ms"]=None
+if status.get("queue_wait_ms") is None:
+    q=status.get("queued_at")
+    s=status.get("started_at")
+    if isinstance(q,(int,float)) and isinstance(s,(int,float)):
+        status["queue_wait_ms"]=max(0,int((float(s)-float(q))*1000))
+print(json.dumps({"ok": True, "result": status}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "batch_cancel" ]]; then
+  JOB_ID="$(python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("args",[]); print(a[0] if a else "")' <<<"$REQ" 2>/dev/null || true)"
+  if [[ -z "$JOB_ID" ]]; then
+    echo '{"ok": false, "error": "batch_cancel requiere job_id"}'
+    exit 1
+  fi
+  mkdir -p "$JOB_DIR"
+  CANCEL_PATH="$JOB_DIR/${JOB_ID}.status.cancel"
+  touch "$CANCEL_PATH"
+  python3 - <<'PY'
+import json
+print(json.dumps({"ok": True, "result": True}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "get_runtime_resource_info" ]]; then
+  python3 - <<'PY'
+import json
+from resource_monitor import ResourceMonitor
+
+monitor = ResourceMonitor()
+snapshot = monitor.snapshot()
+gpu_snapshot = monitor.gpu_snapshot()
+
+gpu_info = {"available": gpu_snapshot is not None}
+if gpu_snapshot is not None:
+    gpu_info.update(
+        {
+            "backend": gpu_snapshot.backend,
+            "device_count": gpu_snapshot.device_count,
+            "name": gpu_snapshot.name,
+            "driver_version": gpu_snapshot.driver_version,
+            "utilization_percent": gpu_snapshot.utilization_percent,
+            "memory_total_mb": gpu_snapshot.memory_total_mb,
+            "memory_used_mb": gpu_snapshot.memory_used_mb,
+            "memory_free_mb": gpu_snapshot.memory_free_mb,
+        }
+    )
+else:
+    gpu_info.update(
+        {
+            "backend": "none",
+            "device_count": 0,
+            "name": None,
+            "driver_version": None,
+            "utilization_percent": None,
+            "memory_total_mb": None,
+            "memory_used_mb": None,
+            "memory_free_mb": None,
+        }
+    )
+
+result = {
+    "summary": snapshot.format_summary(),
+    "cpu": {
+        "cpu_count": snapshot.cpu_count,
+        "cpu_percent": snapshot.cpu_percent,
+        "memory_percent": snapshot.memory_percent,
+        "memory_available_gb": snapshot.memory_available_gb,
+        "ffmpeg_processes": snapshot.ffmpeg_processes,
+    },
+    "gpu": gpu_info,
+}
+print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "ensure_ffmpeg_available" ]]; then
+  python3 - <<'PY'
+import json
+from audio_tools import ensure_ffmpeg_available
+ensure_ffmpeg_available()
+print(json.dumps({"ok": True, "result": True}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "get_processing_limits" ]]; then
+  python3 - <<'PY'
+import json
+from audio_tools import get_processing_limits
+print(json.dumps({"ok": True, "result": get_processing_limits()}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "get_audio_info" ]]; then
+  python3 - <<'PY' "$REQ"
+import json,sys
+from audio_tools import get_audio_info
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+input_path=str(a[0]) if len(a)>0 else ""
+use_cache=bool(a[1]) if len(a)>1 else True
+print(json.dumps({"ok": True, "result": get_audio_info(input_path, use_cache=use_cache)}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "extract_loudnorm_stats" ]]; then
+  python3 - <<'PY' "$REQ"
+import json,sys
+from audio_tools import extract_loudnorm_stats
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+output=str(a[0]) if len(a)>0 else ""
+print(json.dumps({"ok": True, "result": extract_loudnorm_stats(output)}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "cancel_running_ffmpeg_processes" ]]; then
+  python3 - <<'PY'
+import json
+from audio_tools import cancel_running_ffmpeg_processes
+print(json.dumps({"ok": True, "result": int(cancel_running_ffmpeg_processes())}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "fix_audio_tools" ]]; then
+  python3 - <<'PY' "$REQ" "$ROOT_DIR"
+import json,sys,pathlib
+from fix_audio_tools import apply_fixes
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+root=pathlib.Path(sys.argv[2])
+target = pathlib.Path(a[0]) if len(a)>0 and a[0] else (root / "audio_tools.py")
+dry_run = bool(a[1]) if len(a)>1 else False
+res = apply_fixes(target=target, dry_run=dry_run)
+print(json.dumps({"ok": True, "result": res}, ensure_ascii=False))
+PY
+  exit 0
+fi
+
+if [[ "$METHOD" == "ensure_output_path" ]]; then
+  BASE="$(python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("args",[]); p=(a[0].get("value") if isinstance(a[0],dict) and a[0].get("__type__")=="path" else a[0]) if len(a)>0 else ""; print(p)' <<<"$REQ")"
+  FMT="$(python3 -c 'import json,sys; d=json.load(sys.stdin); a=d.get("args",[]); print(a[1] if len(a)>1 else "")' <<<"$REQ")"
+
+  CORE_OUT="$(printf '%s\n%s\n%s\n' "$METHOD" "$BASE" "$FMT" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  BASE_OUT="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  EXT_OUT="$(printf '%s\n' "$CORE_OUT" | sed -n '3p')"
+  APPEND_FLAG="$(printf '%s\n' "$CORE_OUT" | sed -n '4p')"
+
+  if [[ "$STATUS" == "OK" ]]; then
+    VALUE="$BASE_OUT"
+    if [[ "$APPEND_FLAG" == "1" ]]; then
+      VALUE="${BASE_OUT}${EXT_OUT}"
+    fi
+    python3 -c 'import json,sys; v=sys.argv[1]; print(json.dumps({"ok": True, "result": {"__type__":"path","value": v}}, ensure_ascii=False))' "$VALUE"
+    exit 0
+  fi
+
+  python3 -c 'import json,sys; e=sys.argv[1] or "error_spasm_core"; print(json.dumps({"ok": False, "error": e}, ensure_ascii=False))' "$BASE_OUT"
+  exit 1
+fi
+
+if [[ "$METHOD" == "resolve_repair_levels" ]]; then
+  PAYLOAD="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+stats=a[0] if len(a)>0 else None
+noise=a[1] if len(a)>1 else "Off"
+declip=a[2] if len(a)>2 else "Off"
+declick=a[3] if len(a)>3 else "Off"
+has_stats=1 if isinstance(stats,dict) else 0
+input_tp=0.0; input_thresh=-50.0
+if isinstance(stats,dict):
+    input_tp=float(stats.get("input_tp",0.0) or 0.0)
+    input_thresh=float(stats.get("input_thresh",-50.0) or -50.0)
+print(noise); print(declip); print(declick); print(has_stats); print(int(round(input_tp*100.0))); print(int(round(input_thresh*100.0)))
+PY
+)"
+  CORE_OUT="$(printf '%s\n%s\n' "$METHOD" "$PAYLOAD" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  N="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  DCL="$(printf '%s\n' "$CORE_OUT" | sed -n '3p')"
+  DCK="$(printf '%s\n' "$CORE_OUT" | sed -n '4p')"
+  if [[ "$STATUS" == "OK" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": True, "result": [sys.argv[1],sys.argv[2],sys.argv[3]]}, ensure_ascii=False))' "$N" "$DCL" "$DCK"
+    exit 0
+  fi
+  python3 -c 'import json; print(json.dumps({"ok": False, "error":"error_spasm_core_resolve_repair_levels"}, ensure_ascii=False))'
+  exit 1
+fi
+
+if [[ "$METHOD" == "evaluate_mix" ]]; then
+  PAYLOAD="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+stats=a[0] if len(a)>0 and isinstance(a[0],dict) else {}
+target=float(a[1] if len(a)>1 else -14.0)
+tp=float(a[2] if len(a)>2 else -1.0)
+ii=float(stats.get("input_i",0.0) or 0.0)
+itp=float(stats.get("input_tp",0.0) or 0.0)
+ilra=float(stats.get("input_lra",0.0) or 0.0)
+off=float(stats.get("target_offset",0.0) or 0.0)
+vals=[ii,itp,ilra,off,target,tp]
+for v in vals: print(int(round(v*100.0)))
+PY
+)"
+  CORE_OUT="$(printf '%s\n%s\n' "$METHOD" "$PAYLOAD" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  RATING="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  ADVICE="$(printf '%s\n' "$CORE_OUT" | sed -n '3p')"
+  if [[ "$STATUS" == "OK" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": True, "result": [sys.argv[1],sys.argv[2]]}, ensure_ascii=False))' "$RATING" "$ADVICE"
+    exit 0
+  fi
+  python3 -c 'import json; print(json.dumps({"ok": False, "error":"error_spasm_core_evaluate_mix"}, ensure_ascii=False))'
+  exit 1
+fi
+
+if [[ "$METHOD" == "format_analysis_summary" ]]; then
+  PAYLOAD="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[])
+label=a[0] if len(a)>0 else "Análisis"
+stats=a[1] if len(a)>1 and isinstance(a[1],dict) else {}
+band_stats=a[2] if len(a)>2 and isinstance(a[2],dict) else {}
+voice_rms=a[3] if len(a)>3 else None
+target_lufs=float(a[4] if len(a)>4 else -14.0)
+true_peak=float(a[5] if len(a)>5 else -1.0)
+band_labels=[
+    "Subbass (20-60 Hz)",
+    "Bass (60-250 Hz)",
+    "Low-Mid (250-500 Hz)",
+    "Mid (500-2k Hz)",
+    "High-Mid (2k-6k Hz)",
+    "Air (6k-16k Hz)",
+]
+def f(v,default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+def s2(v):
+    return f"{f(v):.2f}"
+print(label)
+print(s2(stats.get("input_i",0.0)))
+print(s2(stats.get("input_tp",0.0)))
+print(s2(stats.get("input_lra",0.0)))
+print(int(round(f(stats.get("input_i",0.0))*100.0)))
+print(int(round(f(stats.get("input_tp",0.0))*100.0)))
+print(int(round(f(stats.get("input_lra",0.0))*100.0)))
+print(int(round(f(stats.get("target_offset",0.0))*100.0)))
+print(int(round(target_lufs*100.0)))
+print(int(round(true_peak*100.0)))
+if isinstance(voice_rms, (int, float)):
+    print(1)
+    print(f"{float(voice_rms):.2f}")
+else:
+    print(0)
+    print("")
+for label in band_labels:
+    if label in band_stats:
+        print(s2(band_stats.get(label, 0.0)))
+    else:
+        print("")
+PY
+)"
+  CORE_OUT="$(printf '%s\n%s\n' "$METHOD" "$PAYLOAD" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  if [[ "$STATUS" == "OK" ]]; then
+    SUMMARY="$(printf '%s\n' "$CORE_OUT" | sed '1d')"
+    python3 -c 'import json,sys; print(json.dumps({"ok": True, "result": sys.argv[1]}, ensure_ascii=False))' "$SUMMARY"
+    exit 0
+  fi
+  ERROR="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": sys.argv[1] or "error_spasm_core_format_analysis_summary"}, ensure_ascii=False))' "$ERROR"
+  exit 1
+fi
+
+if [[ "$METHOD" == "write_analysis_toml" ]]; then
+  python3 - <<'PY' "$REQ"
+import json,sys,pathlib
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+def uw(v):
+    if isinstance(v,dict) and v.get("__type__")=="path":
+        return pathlib.Path(v.get("value",""))
+    return v
+a=[uw(x) for x in a]
+kw={k: uw(v) for k,v in kw.items()}
+
+def _f(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+def _esc(s: str) -> str:
+    return str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+(
+    output_path,
+    target_lufs,
+    true_peak,
+    loudness_preset,
+    output_preset,
+    output_sr,
+    output_bit_depth,
+    output_format,
+    dynamic_eq,
+    stereo_width,
+    brickwall,
+    analyze_only,
+    deesser,
+    fade_in,
+    fade_out,
+    signature,
+    before_stats,
+    before_band,
+    before_voice,
+    after_stats,
+    after_band,
+    after_voice,
+    before_rating,
+    before_advice,
+    after_rating,
+    after_advice,
+    resource_info,
+) = (a + [None] * 27)[:27]
+
+# Soporte kwargs (llamado principal desde workers).
+if output_path is None:
+    output_path = kw.get("output_path")
+if target_lufs is None:
+    target_lufs = kw.get("target_lufs")
+if true_peak is None:
+    true_peak = kw.get("true_peak")
+if loudness_preset is None:
+    loudness_preset = kw.get("loudness_preset")
+if output_preset is None:
+    output_preset = kw.get("output_preset")
+if output_sr is None:
+    output_sr = kw.get("output_sr")
+if output_bit_depth is None:
+    output_bit_depth = kw.get("output_bit_depth")
+if output_format is None:
+    output_format = kw.get("output_format")
+if dynamic_eq is None:
+    dynamic_eq = kw.get("dynamic_eq")
+if stereo_width is None:
+    stereo_width = kw.get("stereo_width")
+if brickwall is None:
+    brickwall = kw.get("brickwall")
+if analyze_only is None:
+    analyze_only = kw.get("analyze_only")
+if deesser is None:
+    deesser = kw.get("deesser")
+if fade_in is None:
+    fade_in = kw.get("fade_in")
+if fade_out is None:
+    fade_out = kw.get("fade_out")
+if signature is None:
+    signature = kw.get("signature")
+if before_stats is None:
+    before_stats = kw.get("before_stats")
+if before_band is None:
+    before_band = kw.get("before_band")
+if before_voice is None:
+    before_voice = kw.get("before_voice")
+if after_stats is None:
+    after_stats = kw.get("after_stats")
+if after_band is None:
+    after_band = kw.get("after_band")
+if after_voice is None:
+    after_voice = kw.get("after_voice")
+if before_rating is None:
+    before_rating = kw.get("before_rating")
+if before_advice is None:
+    before_advice = kw.get("before_advice")
+if after_rating is None:
+    after_rating = kw.get("after_rating")
+if after_advice is None:
+    after_advice = kw.get("after_advice")
+if resource_info is None:
+    resource_info = kw.get("resource_info")
+
+if output_path is None:
+    print(json.dumps({"ok": False, "error": "write_analysis_toml requiere output_path"}, ensure_ascii=False))
+    raise SystemExit(1)
+
+output_path = pathlib.Path(output_path)
+log_dir = output_path.parent / "log"
+log_dir.mkdir(parents=True, exist_ok=True)
+toml_path = log_dir / f"{output_path.stem}.toml"
+
+before_stats = before_stats if isinstance(before_stats, dict) else {}
+after_stats = after_stats if isinstance(after_stats, dict) else {}
+before_band = before_band if isinstance(before_band, dict) else {}
+after_band = after_band if isinstance(after_band, dict) else {}
+signature = signature if isinstance(signature, dict) else {}
+resource_info = resource_info if isinstance(resource_info, dict) else {}
+
+lines=[]
+lines.append("[settings]")
+lines.append(f'loudness_preset = "{_esc(loudness_preset or "Manual")}"')
+lines.append(f'output_preset = "{_esc(output_preset or "Manual")}"')
+lines.append(f'output_format = "{_esc((output_format or "wav"))}"')
+lines.append(f"target_lufs = {_f(target_lufs, -14.0):.2f}")
+lines.append(f"true_peak = {_f(true_peak, -1.0):.2f}")
+lines.append(f"dynamic_eq = {'true' if bool(dynamic_eq) else 'false'}")
+lines.append(f"stereo_width = {'true' if bool(stereo_width) else 'false'}")
+lines.append(f"brickwall = {'true' if bool(brickwall) else 'false'}")
+lines.append(f"deesser = {'true' if bool(deesser) else 'false'}")
+lines.append(f"fade_in = {_f(fade_in, 0.0):.2f}")
+lines.append(f"fade_out = {_f(fade_out, 0.0):.2f}")
+lines.append(f"analyze_only = {'true' if bool(analyze_only) else 'false'}")
+if output_sr is not None:
+    lines.append(f"output_sample_rate = {int(output_sr)}")
+if output_bit_depth is not None:
+    lines.append(f'output_bit_depth = "{_esc(output_bit_depth)}"')
+
+if signature:
+    lines.append("[signature]")
+    for k,v in signature.items():
+        if v is not None:
+            lines.append(f'{k} = "{_esc(v)}"')
+
+cpu = resource_info.get("cpu", {}) if isinstance(resource_info.get("cpu"), dict) else {}
+gpu = resource_info.get("gpu", {}) if isinstance(resource_info.get("gpu"), dict) else {}
+engine = resource_info.get("engine", {}) if isinstance(resource_info.get("engine"), dict) else {}
+summary = resource_info.get("summary")
+if summary is not None or cpu or gpu or engine:
+    lines.append("[resources]")
+    lines.append(f'resource_summary = "{_esc(summary or "")}"')
+    if cpu:
+        lines.append("[resources.cpu]")
+        for k in ("cpu_count","cpu_percent","memory_percent","memory_available_gb","ffmpeg_processes"):
+            if k in cpu and cpu[k] is not None:
+                v = cpu[k]
+                if isinstance(v, bool):
+                    lines.append(f"{k} = {'true' if v else 'false'}")
+                elif isinstance(v, (int,float)):
+                    lines.append(f"{k} = {v}")
+                else:
+                    lines.append(f'{k} = "{_esc(v)}"')
+    if gpu:
+        lines.append("[resources.gpu]")
+        for k,v in gpu.items():
+            if v is None:
+                continue
+            if isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, (int,float)):
+                lines.append(f"{k} = {v}")
+            else:
+                lines.append(f'{k} = "{_esc(v)}"')
+    if engine:
+        lines.append("[resources.engine]")
+        for k,v in engine.items():
+            if v is None:
+                continue
+            if isinstance(v, bool):
+                lines.append(f"{k} = {'true' if v else 'false'}")
+            elif isinstance(v, (int,float)):
+                lines.append(f"{k} = {v}")
+            else:
+                lines.append(f'{k} = "{_esc(v)}"')
+
+def _render_block(name, stats, band, voice, rating, advice):
+    out=[]
+    out.append(f"[{name}]")
+    out.append(f"input_i = {_f(stats.get('input_i',0.0)):.2f}")
+    out.append(f"input_tp = {_f(stats.get('input_tp',0.0)):.2f}")
+    out.append(f"input_lra = {_f(stats.get('input_lra',0.0)):.2f}")
+    out.append(f"input_thresh = {_f(stats.get('input_thresh',0.0)):.2f}")
+    out.append(f"target_offset = {_f(stats.get('target_offset',0.0)):.2f}")
+    if voice is not None:
+        out.append(f"voice_rms = {_f(voice,0.0):.2f}")
+    out.append(f'rating = "{_esc(rating or "")}"')
+    out.append(f'advice = "{_esc(advice or "")}"')
+    if band:
+        out.append(f"[{name}.bands]")
+        for k,v in band.items():
+            out.append(f'"{_esc(k)}" = {_f(v,0.0):.2f}')
+    return out
+
+lines.extend(_render_block("before", before_stats, before_band, before_voice, before_rating, before_advice))
+if after_stats:
+    lines.extend(_render_block("after", after_stats, after_band, after_voice, after_rating, after_advice))
+
+toml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+res=toml_path
+print(json.dumps({"ok": True, "result": {"__type__":"path","value":str(res)}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_audio" ]]; then
+  INPUT_PATH="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+v=a[0] if len(a)>0 else kw.get("input_path","")
+if isinstance(v,dict) and v.get("__type__")=="path":
+    v=v.get("value","")
+print(str(v))
+PY
+)"
+  TARGET_LUFS="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+print(float(a[1] if len(a)>1 else kw.get("target_lufs",-14.0)))
+PY
+)"
+  TRUE_PEAK="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+print(float(a[2] if len(a)>2 else kw.get("true_peak",-1.0)))
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  ANALYZE_OUT="$(
+    "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+      -af "loudnorm=I=${TARGET_LUFS}:LRA=11:TP=${TRUE_PEAK}:print_format=json" \
+      -f null - 2>&1 || true
+  )"
+
+  LOUDNORM_JSON="$(printf '%s\n' "$ANALYZE_OUT" | awk '
+    BEGIN {cap=0; blk=""; last=""}
+    /^\s*\{/ {cap=1; blk=$0 ORS; next}
+    cap==1 {
+      blk=blk $0 ORS
+      if ($0 ~ /^\s*\}/) {
+        if (blk ~ /"input_i"/) { last=blk }
+        cap=0; blk=""
+      }
+    }
+    END { printf "%s", last }
+  ')"
+
+  if [[ -z "${LOUDNORM_JSON// }" ]]; then
+    python3 - <<'PY' "$ANALYZE_OUT"
+import json,sys
+print(json.dumps({"ok": False, "error": "no se pudo extraer JSON de loudnorm", "raw": sys.argv[1][-2000:]}, ensure_ascii=False))
+PY
+    exit 1
+  fi
+
+  python3 - <<'PY' "$LOUDNORM_JSON" "$ANALYZE_OUT"
+import json,sys,math
+raw_json=sys.argv[1]
+log=sys.argv[2]
+try:
+    data=json.loads(raw_json)
+except Exception as e:
+    print(json.dumps({"ok": False, "error": f"json loudnorm inválido: {e}"}, ensure_ascii=False))
+    raise SystemExit(1)
+
+def f(key, default):
+    try:
+        v=float(data.get(key, default))
+        if math.isinf(v) and v < 0:
+            return -70.0
+        if math.isinf(v) or math.isnan(v):
+            return float(default)
+        return v
+    except Exception:
+        return float(default)
+
+stats={
+    "input_i": f("input_i", -23.0),
+    "input_tp": f("input_tp", -1.0),
+    "input_lra": f("input_lra", 7.0),
+    "input_thresh": f("input_thresh", -33.0),
+    "target_offset": f("target_offset", 0.0),
+}
+print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[stats,log]}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_eq_bands" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+v=a[0] if len(a)>0 else kw.get("input_path","")
+if isinstance(v,dict) and v.get("__type__")=="path":
+    v=v.get("value","")
+verbose=bool(a[1]) if len(a)>1 else bool(kw.get("verbose",False))
+band_range=float(a[2] if len(a)>2 else kw.get("band_range_db",3.0))
+print(json.dumps({"input_path": str(v), "verbose": verbose, "band_range_db": band_range}, ensure_ascii=False))
+PY
+)"
+  INPUT_PATH="$(python3 - <<'PY' "$META"
+import json,sys
+print(json.loads(sys.argv[1])["input_path"])
+PY
+)"
+  BAND_RANGE_DB="$(python3 - <<'PY' "$META"
+import json,sys
+print(float(json.loads(sys.argv[1])["band_range_db"]))
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  # Band config estable (label|low|high)
+  BANDS=(
+    "Subbass (20-60 Hz)|20|60"
+    "Bass (60-250 Hz)|60|250"
+    "Low-Mid (250-500 Hz)|250|500"
+    "Mid (500-2k Hz)|500|2000"
+    "High-Mid (2k-6k Hz)|2000|6000"
+    "Air (6k-16k Hz)|6000|16000"
+  )
+
+  # Fast path: todas las bandas en una sola corrida FFmpeg (filter_complex).
+  FILTER_COMPLEX="[0:a]asplit=6[b0][b1][b2][b3][b4][b5];"
+  MAP_ARGS=()
+  IDX=0
+  for B in "${BANDS[@]}"; do
+    REST="${B#*|}"
+    LOW="${REST%%|*}"
+    HIGH="${REST##*|}"
+    FILTER_COMPLEX+="[b${IDX}]highpass=f=${LOW},lowpass=f=${HIGH},volumedetect[o${IDX}];"
+    MAP_ARGS+=(-map "[o${IDX}]" -f null -)
+    IDX=$((IDX+1))
+  done
+  FILTER_COMPLEX="${FILTER_COMPLEX%;}"
+
+  OUT="$(
+    "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+      -filter_complex "$FILTER_COMPLEX" \
+      "${MAP_ARGS[@]}" 2>&1 || true
+  )"
+
+  BAND_LINES="$(python3 - <<'PY' "$OUT"
+import re,sys
+text=sys.argv[1]
+mean_re=re.compile(r"Parsed_volumedetect_(\d+).*mean_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+peak_re=re.compile(r"Parsed_volumedetect_(\d+).*max_volume:\s*(-?\d+(?:\.\d+)?)\s*dB")
+means={}
+peaks={}
+for line in text.splitlines():
+    m=mean_re.search(line)
+    if m:
+        means[int(m.group(1))]=m.group(2)
+        continue
+    p=peak_re.search(line)
+    if p:
+        peaks[int(p.group(1))]=p.group(2)
+
+# Mapear por orden de índice del filtro volumedetect.
+for idx in sorted(set(means.keys()) | set(peaks.keys())):
+    mean=means.get(idx,"-80.0")
+    peak=peaks.get(idx,"-100.0")
+    print(f"{idx}\t{mean}\t{peak}")
+PY
+)"
+
+  # Fallback robusto: si el parseo rápido no devolvió 6 bandas, usar modo secuencial legado.
+  FAST_COUNT="$(printf '%s\n' "$BAND_LINES" | sed '/^[[:space:]]*$/d' | wc -l)"
+  if [[ "$FAST_COUNT" -lt 6 ]]; then
+    BAND_LINES=""
+    for B in "${BANDS[@]}"; do
+      LABEL="${B%%|*}"
+      REST="${B#*|}"
+      LOW="${REST%%|*}"
+      HIGH="${REST##*|}"
+      OUT="$(
+        "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+          -af "highpass=f=${LOW},lowpass=f=${HIGH},volumedetect" \
+          -f null - 2>&1 || true
+      )"
+      MEAN="$(printf '%s\n' "$OUT" | sed -nE 's/.*mean_volume:[[:space:]]*(-?[0-9]+(\.[0-9]+)?) dB.*/\1/p' | tail -n1)"
+      PEAK="$(printf '%s\n' "$OUT" | sed -nE 's/.*max_volume:[[:space:]]*(-?[0-9]+(\.[0-9]+)?) dB.*/\1/p' | tail -n1)"
+      [[ -z "${MEAN// }" ]] && MEAN="-80.0"
+      [[ -z "${PEAK// }" ]] && PEAK="-100.0"
+      BAND_LINES+="${LABEL}"$'\t'"${MEAN}"$'\t'"${PEAK}"$'\n'
+    done
+  else
+    # Rehidratar índices a labels por orden de aparición (los IDs Parsed_* no siempre arrancan en 0).
+    BAND_LINES="$(python3 - <<'PY' "$BAND_LINES"
+import sys
+bands=[
+    "Subbass (20-60 Hz)",
+    "Bass (60-250 Hz)",
+    "Low-Mid (250-500 Hz)",
+    "Mid (500-2k Hz)",
+    "High-Mid (2k-6k Hz)",
+    "Air (6k-16k Hz)",
+]
+rows=[]
+for line in sys.argv[1].splitlines():
+    if not line.strip():
+        continue
+    try:
+        idx_s,mean,peak=line.split("\t")
+        idx=int(idx_s)
+    except Exception:
+        continue
+    rows.append((idx,mean,peak))
+
+rows.sort(key=lambda t: t[0])
+for pos,(_idx,mean,peak) in enumerate(rows[:len(bands)]):
+    print(f"{bands[pos]}\t{mean}\t{peak}")
+PY
+)"
+    FINAL_COUNT="$(printf '%s\n' "$BAND_LINES" | sed '/^[[:space:]]*$/d' | wc -l)"
+    if [[ "$FINAL_COUNT" -lt 6 ]]; then
+      BAND_LINES=""
+      for B in "${BANDS[@]}"; do
+        LABEL="${B%%|*}"
+        REST="${B#*|}"
+        LOW="${REST%%|*}"
+        HIGH="${REST##*|}"
+        OUT="$(
+          "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+            -af "highpass=f=${LOW},lowpass=f=${HIGH},volumedetect" \
+            -f null - 2>&1 || true
+        )"
+        MEAN="$(printf '%s\n' "$OUT" | sed -nE 's/.*mean_volume:[[:space:]]*(-?[0-9]+(\.[0-9]+)?) dB.*/\1/p' | tail -n1)"
+        PEAK="$(printf '%s\n' "$OUT" | sed -nE 's/.*max_volume:[[:space:]]*(-?[0-9]+(\.[0-9]+)?) dB.*/\1/p' | tail -n1)"
+        [[ -z "${MEAN// }" ]] && MEAN="-80.0"
+        [[ -z "${PEAK// }" ]] && PEAK="-100.0"
+        BAND_LINES+="${LABEL}"$'\t'"${MEAN}"$'\t'"${PEAK}"$'\n'
+      done
+    fi
+  fi
+
+  python3 - <<'PY' "$BAND_LINES" "$BAND_RANGE_DB"
+import json,sys
+raw=sys.argv[1]
+band_range=float(sys.argv[2])
+results={}
+peaks={}
+for line in raw.splitlines():
+    if not line.strip():
+        continue
+    try:
+        label,mean,peak=line.split("\t")
+        results[label]=max(-80.0,float(mean))
+        peaks[label]=float(peak)
+    except Exception:
+        continue
+
+suggestions=[]
+if results:
+    avg=sum(results.values())/len(results)
+    for label,rms_level in results.items():
+        peak_db=peaks.get(label,-100.0)
+        if peak_db > -1.0 and label in ("High-Mid (2k-6k Hz)", "Air (6k-16k Hz)"):
+            suggestions.append(f"{label}: ADVERTENCIA - pico cercano a 0dB ({peak_db:.1f}dB), riesgo de saturación!")
+        elif rms_level > avg + band_range:
+            suggestions.append(f"{label}: posible exceso; considera bajar ~2-3 dB.")
+        elif rms_level < avg - band_range:
+            if label in ("High-Mid (2k-6k Hz)", "Air (6k-16k Hz)") and peak_db > -3.0:
+                continue
+            suggestions.append(f"{label}: posible falta; considera subir ~2-3 dB.")
+
+print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[results,suggestions]}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_voice_band" ]]; then
+  INPUT_PATH="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+v=a[0] if len(a)>0 else kw.get("input_path","")
+if isinstance(v,dict) and v.get("__type__")=="path":
+    v=v.get("value","")
+print(str(v))
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  # Banda vocal aprox 300-3000 Hz, igual que VOICE_BAND en config.py
+  ANALYZE_OUT="$(
+    "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+      -af "highpass=f=300,lowpass=f=3000,astats=metadata=1:reset=1" \
+      -f null - 2>&1 || true
+  )"
+
+  RMS_VALUE="$(printf '%s\n' "$ANALYZE_OUT" | awk '
+    /RMS level dB:/ {
+      v=$NF
+      gsub(/\r/,"",v)
+      if (v!="inf" && v!="-inf" && v!="nan") last=v
+    }
+    END { if (last!="") print last; }
+  ')"
+
+  if [[ -z "${RMS_VALUE// }" ]]; then
+    python3 -c 'import json; print(json.dumps({"ok": True, "result": None}, ensure_ascii=False))'
+  else
+    python3 -c 'import json,sys; print(json.dumps({"ok": True, "result": float(sys.argv[1])}, ensure_ascii=False))' "$RMS_VALUE"
+  fi
+  exit $?
+fi
+
+if [[ "$METHOD" == "build_preprocess_chain" ]]; then
+  HEADROOM_EFFECTIVE="$(python3 - <<'PY' "$REQ"
+import json,sys,math
+d=json.loads(sys.argv[1]); kw=d.get("kwargs",{}) or {}
+def b(name, default=False):
+    v=kw.get(name, default)
+    if isinstance(v,bool): return v
+    if isinstance(v,(int,float)): return v != 0
+    if isinstance(v,str):
+        t=v.strip().lower()
+        if t in ("1","true","yes","on","si","sí"): return True
+        if t in ("0","false","no","off",""): return False
+    return bool(v)
+def f(name, default=0.0):
+    try:
+        return float(kw.get(name, default) or default)
+    except Exception:
+        return float(default)
+base=f("headroom_db",-17.0)
+lift=0.0
+lift += max(0.0, f("tone_mid_db",0.0)) * 0.25
+lift += max(0.0, f("sub_bass_db",0.0)) * 0.20
+lift += max(0.0, f("tone_high_db",0.0) + f("tone_tilt_db",0.0)) * 0.35
+if b("deesser",False):
+    lift += 0.8
+if b("glue_enabled",False):
+    lift += 1.0
+if b("saturation_enabled",False):
+    drive=abs(f("saturation_drive_db",0.0))
+    mix=max(0.0,min(1.0,f("saturation_mix",0.0)))
+    lift += min(2.0, drive*0.20 + mix*2.0)
+if b("autogain_enabled",True):
+    maxg=max(1.0,f("autogain_maxgain",1.35))
+    lift += max(0.0, maxg-1.0) * 1.2
+eff = base - lift
+eff = max(-24.0, min(-14.0, eff))
+print(f"{eff:.2f}")
+PY
+)"
+
+  if ! PAYLOAD="$(python3 - <<'PY' "$REQ" 2>&1
+import json,sys
+d=json.loads(sys.argv[1]); kw=d.get("kwargs",{}) or {}
+def bget(name,default=False):
+    v=kw.get(name,default)
+    if isinstance(v,bool):
+        return v
+    if isinstance(v,(int,float)):
+        return v != 0
+    if isinstance(v,str):
+        t=v.strip().lower()
+        if t in ("1","true","yes","on","si","sí"):
+            return True
+        if t in ("0","false","no","off",""):
+            return False
+    return bool(v)
+def b(name,default=False):
+    print(1 if bget(name,default) else 0)
+def f(name,default=0.0):
+    try:
+        v=float(kw.get(name,default) or default)
+    except Exception:
+        v=float(default)
+    print(v)
+b("mix_enabled", True)
+b("autogain_enabled", True)
+b("stereo_width", False)
+f("headroom_db", -17.0)
+b("deesser", False)
+f("deesser_freq_hz", 6000.0)
+f("deesser_intensity", 1.0)
+print(str(kw.get("noise_reduction_level","Off") or "Off"))
+print(str(kw.get("declip_level","Off") or "Off"))
+print(str(kw.get("declick_level","Off") or "Off"))
+def fget(name, default=0.0):
+    try:
+        return float(kw.get(name, default) or default)
+    except Exception:
+        return float(default)
+low=fget("tone_low_db",0.0)
+tilt=fget("tone_tilt_db",0.0)
+high=fget("tone_high_db",0.0)
+print(low - tilt)   # tone_low_effective_db
+f("sub_bass_db", 0.0)
+f("tone_mid_db", 0.0)
+print(high + tilt)  # tone_high_effective_db
+b("saturation_enabled", False)
+b("saturation_per_band", False)
+f("saturation_drive_db", 0.0)
+f("saturation_mix", 0.0)
+v=kw.get("saturation_type","Tape")
+print(str(v) if v is not None else "Tape")
+b("glue_enabled", False)
+f("glue_threshold_db", -18.0)
+f("glue_ratio", 1.4)
+f("glue_attack_ms", 20.0)
+f("glue_release_ms", 120.0)
+f("glue_makeup_db", 0.0)
+f("autogain_maxgain", 2.0)
+PY
+  )"; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": "build_preprocess_chain_payload_error", "detail": sys.argv[1][-1200:]}, ensure_ascii=False))' "$PAYLOAD"
+    exit 1
+  fi
+
+  CORE_OUT="$(printf '%s\n%s\n' "$METHOD" "$PAYLOAD" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  CHAIN="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  OUTLBL="$(printf '%s\n' "$CORE_OUT" | sed -n '3p')"
+  if [[ "$STATUS" == "OK" ]]; then
+    CHAIN="$(python3 - <<'PY' "$CHAIN" "$HEADROOM_EFFECTIVE"
+import sys,re
+chain=sys.argv[1]
+hr=float(sys.argv[2])
+out=re.sub(r'volume=-17\.0dB', f'volume={hr:.2f}dB', chain, count=1)
+print(out)
+PY
+)"
+    python3 -c 'import json,sys; print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[sys.argv[1],sys.argv[2]]}}, ensure_ascii=False))' "$CHAIN" "$OUTLBL"
+    exit 0
+  fi
+  python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": sys.argv[1] or "error_spasm_core_build_preprocess_chain"}, ensure_ascii=False))' "$CHAIN"
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_audio_with_filter" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+def path_of(v):
+    if isinstance(v,dict) and v.get("__type__")=="path":
+        return str(v.get("value",""))
+    return str(v)
+input_path=path_of(a[0]) if len(a)>0 else path_of(kw.get("input_path",""))
+target_lufs=float(a[1] if len(a)>1 else kw.get("target_lufs",-14.0))
+true_peak=float(a[2] if len(a)>2 else kw.get("true_peak",-1.0))
+filter_chain=str(a[3]) if len(a)>3 else str(kw.get("filter_chain",""))
+filter_output=str(a[4]) if len(a)>4 else str(kw.get("filter_output",""))
+print(json.dumps({
+  "input_path": input_path,
+  "target_lufs": target_lufs,
+  "true_peak": true_peak,
+  "filter_chain": filter_chain,
+  "filter_output": filter_output
+}, ensure_ascii=False))
+PY
+)"
+
+  INPUT_PATH="$(python3 - <<'PY' "$META"
+import json,sys
+print(json.loads(sys.argv[1])["input_path"])
+PY
+)"
+  TARGET_LUFS="$(python3 - <<'PY' "$META"
+import json,sys
+print(float(json.loads(sys.argv[1])["target_lufs"]))
+PY
+)"
+  TRUE_PEAK="$(python3 - <<'PY' "$META"
+import json,sys
+print(float(json.loads(sys.argv[1])["true_peak"]))
+PY
+)"
+  FILTER_CHAIN="$(python3 - <<'PY' "$META"
+import json,sys
+print(json.loads(sys.argv[1])["filter_chain"])
+PY
+)"
+  FILTER_OUTPUT="$(python3 - <<'PY' "$META"
+import json,sys
+print(json.loads(sys.argv[1])["filter_output"])
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  if [[ -n "$FILTER_CHAIN" && -n "$FILTER_OUTPUT" ]]; then
+    FILTER_COMPLEX="${FILTER_CHAIN};[${FILTER_OUTPUT}]loudnorm=I=${TARGET_LUFS}:LRA=11:TP=${TRUE_PEAK}:print_format=json[out]"
+    ANALYZE_OUT="$(
+      "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+        -filter_complex "$FILTER_COMPLEX" -map "[out]" \
+        -f null - 2>&1 || true
+    )"
+  else
+    ANALYZE_OUT="$(
+      "$FFMPEG_BIN" -hide_banner -nostdin -i "$INPUT_PATH" \
+        -af "loudnorm=I=${TARGET_LUFS}:LRA=11:TP=${TRUE_PEAK}:print_format=json" \
+        -f null - 2>&1 || true
+    )"
+  fi
+
+  LOUDNORM_JSON="$(printf '%s\n' "$ANALYZE_OUT" | awk '
+    BEGIN {cap=0; blk=""; last=""}
+    /^\s*\{/ {cap=1; blk=$0 ORS; next}
+    cap==1 {
+      blk=blk $0 ORS
+      if ($0 ~ /^\s*\}/) {
+        if (blk ~ /"input_i"/) { last=blk }
+        cap=0; blk=""
+      }
+    }
+    END { printf "%s", last }
+  ')"
+
+  if [[ -z "${LOUDNORM_JSON// }" ]]; then
+    python3 - <<'PY' "$ANALYZE_OUT"
+import json,sys
+print(json.dumps({"ok": False, "error": "no se pudo extraer JSON de loudnorm", "raw": sys.argv[1][-2000:]}, ensure_ascii=False))
+PY
+    exit 1
+  fi
+
+  python3 - <<'PY' "$LOUDNORM_JSON" "$ANALYZE_OUT"
+import json,sys,math
+raw_json=sys.argv[1]
+log=sys.argv[2]
+try:
+    data=json.loads(raw_json)
+except Exception as e:
+    print(json.dumps({"ok": False, "error": f"json loudnorm inválido: {e}"}, ensure_ascii=False))
+    raise SystemExit(1)
+
+def f(key, default):
+    try:
+        v=float(data.get(key, default))
+        if math.isinf(v) and v < 0:
+            return -70.0
+        if math.isinf(v) or math.isnan(v):
+            return float(default)
+        return v
+    except Exception:
+        return float(default)
+
+stats={
+    "input_i": f("input_i", -23.0),
+    "input_tp": f("input_tp", -1.0),
+    "input_lra": f("input_lra", 7.0),
+    "input_thresh": f("input_thresh", -33.0),
+    "target_offset": f("target_offset", 0.0),
+}
+print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[stats,log]}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "apply_output_gain" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+def path_of(v):
+    if isinstance(v,dict) and v.get("__type__")=="path":
+        return str(v.get("value",""))
+    return str(v)
+def f(v,default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+input_path = path_of(a[0]) if len(a)>0 else path_of(kw.get("input_path",""))
+output_path = path_of(a[1]) if len(a)>1 else path_of(kw.get("output_path",""))
+gain_db = f(a[2] if len(a)>2 else kw.get("gain_db",0.0), 0.0)
+true_peak = f(a[3] if len(a)>3 else kw.get("true_peak",-1.0), -1.0)
+limiter_ceiling_db = kw.get("limiter_ceiling_db", a[4] if len(a)>4 else None)
+limiter_release_ms = kw.get("limiter_release_ms", a[5] if len(a)>5 else None)
+overwrite = bool(kw.get("overwrite", False))
+verbose = bool(kw.get("verbose", False))
+output_sr = kw.get("output_sr", None)
+output_bit_depth = kw.get("output_bit_depth", None)
+output_format = kw.get("output_format", None)
+metadata = kw.get("metadata", {}) or {}
+print(json.dumps({
+  "input_path": input_path,
+  "output_path": output_path,
+  "gain_db": gain_db,
+  "true_peak": true_peak,
+  "limiter_ceiling_db": limiter_ceiling_db,
+  "limiter_release_ms": limiter_release_ms,
+  "overwrite": overwrite,
+  "verbose": verbose,
+  "output_sr": output_sr,
+  "output_bit_depth": output_bit_depth,
+  "output_format": output_format,
+  "metadata": metadata
+}, ensure_ascii=False))
+PY
+)"
+
+  readarray -t APPLY_VARS < <(python3 - <<'PY' "$META"
+import json,sys,math
+m=json.loads(sys.argv[1])
+def f(v,d=0.0):
+    try: return float(v)
+    except: return float(d)
+input_path=m["input_path"]
+output_path=m["output_path"]
+gain_db=f(m["gain_db"],0.0)
+true_peak=f(m["true_peak"],-1.0)
+brickwall_extra_db=-0.5
+limit_db=true_peak+brickwall_extra_db
+lcdb=m.get("limiter_ceiling_db", None)
+if lcdb is not None:
+    try: limit_db=min(float(lcdb), limit_db)
+    except: pass
+release_ms=m.get("limiter_release_ms", None)
+release_ms=100.0 if release_ms is None else max(10.0,float(release_ms))
+attack_ms=1.0
+limit_linear=max(0.0625,min(1.0,10**(limit_db/20.0)))
+print(input_path)
+print(output_path)
+print(f"{gain_db:.4f}")
+print(f"{limit_linear:.6f}")
+print(f"{attack_ms:.1f}")
+print(f"{release_ms:.1f}")
+print("1" if m.get("overwrite",False) else "0")
+print(m.get("output_sr") if m.get("output_sr") is not None else "")
+print(m.get("output_bit_depth") if m.get("output_bit_depth") is not None else "")
+print((m.get("output_format") or "").lower())
+print(json.dumps(m.get("metadata",{}) or {}, ensure_ascii=False))
+PY
+)
+  INPUT_PATH="${APPLY_VARS[0]}"
+  OUTPUT_PATH="${APPLY_VARS[1]}"
+  GAIN_DB="${APPLY_VARS[2]}"
+  LIMIT_LINEAR="${APPLY_VARS[3]}"
+  ATTACK_MS="${APPLY_VARS[4]}"
+  RELEASE_MS="${APPLY_VARS[5]}"
+  OVERWRITE_FLAG="${APPLY_VARS[6]}"
+  OUTPUT_SR="${APPLY_VARS[7]}"
+  OUTPUT_BIT_DEPTH="${APPLY_VARS[8]}"
+  OUTPUT_FORMAT="${APPLY_VARS[9]}"
+  METADATA_JSON="${APPLY_VARS[10]}"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  FF_ARGS=()
+  if [[ "$OVERWRITE_FLAG" == "1" ]]; then FF_ARGS+=("-y"); else FF_ARGS+=("-n"); fi
+  FF_ARGS+=("-hide_banner" "-nostdin" "-i" "$INPUT_PATH")
+  FF_ARGS+=("-af" "volume=${GAIN_DB}dB,alimiter=limit=${LIMIT_LINEAR}:attack=${ATTACK_MS}:release=${RELEASE_MS}:level=false:latency=true")
+
+  if [[ -n "$OUTPUT_SR" ]]; then
+    FF_ARGS+=("-ar" "$OUTPUT_SR")
+  fi
+  case "$OUTPUT_FORMAT" in
+    wav)
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-c:a" "pcm_s24le"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-c:a" "pcm_s16le"); fi
+      ;;
+    aiff|aif)
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-c:a" "pcm_s24be"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-c:a" "pcm_s16be"); fi
+      ;;
+    flac)
+      FF_ARGS+=("-c:a" "flac")
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-sample_fmt" "s16"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-sample_fmt" "s32"); fi
+      ;;
+    m4a)
+      FF_ARGS+=("-c:a" "aac" "-b:a" "256k")
+      ;;
+    mp3)
+      FF_ARGS+=("-c:a" "libmp3lame" "-b:a" "320k")
+      ;;
+  esac
+
+  while IFS= read -r meta_line; do
+    FF_ARGS+=("-metadata" "$meta_line")
+  done < <(python3 - <<'PY' "$METADATA_JSON"
+import json,sys
+m=json.loads(sys.argv[1]) if sys.argv[1].strip() else {}
+for k,v in (m.items() if isinstance(m,dict) else []):
+    if v is None: 
+        continue
+    s=str(v)
+    if s:
+        print(f"{k}={s}")
+PY
+)
+
+  FF_ARGS+=("$OUTPUT_PATH")
+  APPLY_STATUS=0
+  APPLY_OUT="$(SPASM_BIN="$SPASM_BIN" "$FFMPEG_BIN" "${FF_ARGS[@]}" 2>&1)" || APPLY_STATUS=$?
+  if [[ "$APPLY_STATUS" -ne 0 ]]; then
+    python3 - <<'PY' "$APPLY_OUT"
+import json,sys
+print(json.dumps({"ok": False, "error": "ffmpeg falló en apply_output_gain", "raw": sys.argv[1][-2000:]}, ensure_ascii=False))
+PY
+    exit "$APPLY_STATUS"
+  fi
+  python3 - <<'PY' "$APPLY_OUT"
+import json,sys
+print(json.dumps({"ok": True, "result": sys.argv[1]}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "normalize_audio" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+def path_of(v):
+    if isinstance(v,dict) and v.get("__type__")=="path":
+        return str(v.get("value",""))
+    return str(v)
+def f(v,d=0.0):
+    try: return float(v)
+    except: return float(d)
+def b(v,d=False):
+    if v is None: return bool(d)
+    return bool(v)
+input_path = path_of(a[0]) if len(a)>0 else path_of(kw.get("input_path",""))
+output_path = path_of(a[1]) if len(a)>1 else path_of(kw.get("output_path",""))
+stats = a[2] if len(a)>2 and isinstance(a[2],dict) else (kw.get("stats",{}) if isinstance(kw.get("stats",{}),dict) else {})
+target_lufs = f(a[3] if len(a)>3 else kw.get("target_lufs",-14.0), -14.0)
+true_peak = f(a[4] if len(a)>4 else kw.get("true_peak",-1.0), -1.0)
+overwrite = b(a[5] if len(a)>5 else kw.get("overwrite",False), False)
+verbose = b(a[6] if len(a)>6 else kw.get("verbose",False), False)
+payload={
+  "input_path": input_path, "output_path": output_path, "stats": stats,
+  "target_lufs": target_lufs, "true_peak": true_peak,
+  "overwrite": overwrite, "verbose": verbose,
+  "master_enabled": b(kw.get("master_enabled", True), True),
+  "mix_enabled": b(kw.get("mix_enabled", True), True),
+  "autogain_enabled": b(kw.get("autogain_enabled", True), True),
+  "stereo_width": b(kw.get("stereo_width", False), False),
+  "headroom_db": f(kw.get("headroom_db",-17.0),-17.0),
+  "deesser": b(kw.get("deesser", False), False),
+  "deesser_freq_hz": f(kw.get("deesser_freq_hz", 6000.0), 6000.0),
+  "deesser_intensity": f(kw.get("deesser_intensity", 1.0), 1.0),
+  "noise_reduction_level": str(kw.get("noise_reduction_level","Off")),
+  "declip_level": str(kw.get("declip_level","Off")),
+  "declick_level": str(kw.get("declick_level","Off")),
+  "tone_low_db": f(kw.get("tone_low_db",0.0),0.0),
+  "sub_bass_db": f(kw.get("sub_bass_db",0.0),0.0),
+  "tone_mid_db": f(kw.get("tone_mid_db",0.0),0.0),
+  "tone_high_db": f(kw.get("tone_high_db",0.0),0.0),
+  "tone_tilt_db": f(kw.get("tone_tilt_db",0.0),0.0),
+  "saturation_enabled": b(kw.get("saturation_enabled",False),False),
+  "saturation_per_band": b(kw.get("saturation_per_band",False),False),
+  "saturation_drive_db": f(kw.get("saturation_drive_db",0.0),0.0),
+  "saturation_mix": f(kw.get("saturation_mix",0.0),0.0),
+  "saturation_type": str(kw.get("saturation_type","Tape")),
+  "glue_enabled": b(kw.get("glue_enabled",False),False),
+  "glue_threshold_db": f(kw.get("glue_threshold_db",-18.0),-18.0),
+  "glue_ratio": f(kw.get("glue_ratio",1.4),1.4),
+  "glue_attack_ms": f(kw.get("glue_attack_ms",20.0),20.0),
+  "glue_release_ms": f(kw.get("glue_release_ms",120.0),120.0),
+  "glue_makeup_db": f(kw.get("glue_makeup_db",0.0),0.0),
+  "autogain_maxgain": f(kw.get("autogain_maxgain",2.0),2.0),
+  "fade_in": f(kw.get("fade_in",0.0),0.0),
+  "fade_out": f(kw.get("fade_out",0.0),0.0),
+  "output_sr": kw.get("output_sr", None),
+  "output_bit_depth": kw.get("output_bit_depth", None),
+  "output_format": (kw.get("output_format", None) or ""),
+  "metadata": kw.get("metadata", {}) if isinstance(kw.get("metadata",{}),dict) else {}
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)"
+
+  INPUT_PATH="$(python3 - <<'PY' "$META"
+import json,sys; print(json.loads(sys.argv[1])["input_path"])
+PY
+)"
+  OUTPUT_PATH="$(python3 - <<'PY' "$META"
+import json,sys; print(json.loads(sys.argv[1])["output_path"])
+PY
+)"
+  TARGET_LUFS="$(python3 - <<'PY' "$META"
+import json,sys; print(float(json.loads(sys.argv[1])["target_lufs"]))
+PY
+)"
+  TRUE_PEAK="$(python3 - <<'PY' "$META"
+import json,sys; print(float(json.loads(sys.argv[1])["true_peak"]))
+PY
+)"
+  MASTER_ENABLED="$(python3 - <<'PY' "$META"
+import json,sys; print(1 if json.loads(sys.argv[1])["master_enabled"] else 0)
+PY
+)"
+  OVERWRITE_FLAG="$(python3 - <<'PY' "$META"
+import json,sys; print(1 if json.loads(sys.argv[1])["overwrite"] else 0)
+PY
+)"
+  FADE_IN="$(python3 - <<'PY' "$META"
+import json,sys; print(float(json.loads(sys.argv[1])["fade_in"]))
+PY
+)"
+  FADE_OUT="$(python3 - <<'PY' "$META"
+import json,sys; print(float(json.loads(sys.argv[1])["fade_out"]))
+PY
+)"
+  OUTPUT_SR="$(python3 - <<'PY' "$META"
+import json,sys; v=json.loads(sys.argv[1])["output_sr"]; print(v if v is not None else "")
+PY
+)"
+  OUTPUT_BIT_DEPTH="$(python3 - <<'PY' "$META"
+import json,sys; v=json.loads(sys.argv[1])["output_bit_depth"]; print(v if v is not None else "")
+PY
+)"
+  OUTPUT_FORMAT="$(python3 - <<'PY' "$META"
+import json,sys; print((json.loads(sys.argv[1])["output_format"] or "").lower())
+PY
+)"
+  METADATA_JSON="$(python3 - <<'PY' "$META"
+import json,sys; print(json.dumps(json.loads(sys.argv[1])["metadata"], ensure_ascii=False))
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  # Build preprocess chain via core SpASM
+  HEADROOM_EFFECTIVE="$(python3 - <<'PY' "$META"
+import json,sys
+m=json.loads(sys.argv[1])
+def b(v, d=False):
+    if v is None: return d
+    if isinstance(v,bool): return v
+    if isinstance(v,(int,float)): return v != 0
+    if isinstance(v,str):
+        t=v.strip().lower()
+        if t in ("1","true","yes","on","si","sí"): return True
+        if t in ("0","false","no","off",""): return False
+    return bool(v)
+def f(v, d=0.0):
+    try: return float(v)
+    except Exception: return float(d)
+base=f(m.get("headroom_db",-17.0),-17.0)
+lift=0.0
+lift += max(0.0, f(m.get("tone_mid_db",0.0),0.0))*0.25
+lift += max(0.0, f(m.get("sub_bass_db",0.0),0.0))*0.20
+lift += max(0.0, f(m.get("tone_high_db",0.0),0.0)+f(m.get("tone_tilt_db",0.0),0.0))*0.35
+if b(m.get("deesser",False),False): lift += 0.8
+if b(m.get("glue_enabled",False),False): lift += 1.0
+if b(m.get("saturation_enabled",False),False):
+    drive=abs(f(m.get("saturation_drive_db",0.0),0.0))
+    mix=max(0.0,min(1.0,f(m.get("saturation_mix",0.0),0.0)))
+    lift += min(2.0, drive*0.20 + mix*2.0)
+if b(m.get("autogain_enabled",True),True):
+    maxg=max(1.0,f(m.get("autogain_maxgain",1.35),1.35))
+    lift += max(0.0,maxg-1.0)*1.2
+eff=max(-24.0,min(-14.0,base-lift))
+print(f"{eff:.2f}")
+PY
+)"
+  BP_REQ="$(python3 - "$META" "$HEADROOM_EFFECTIVE" <<'PY'
+import json,sys
+m=json.loads(sys.argv[1])
+req={"method":"build_preprocess_chain","args":[],"kwargs":{
+  "mix_enabled":m["mix_enabled"], "autogain_enabled":m["autogain_enabled"],
+  "stereo_width":m["stereo_width"],
+  "headroom_db":float(sys.argv[2]),
+  "deesser":m["deesser"], "deesser_freq_hz":m["deesser_freq_hz"], "deesser_intensity":m["deesser_intensity"],
+  "noise_reduction_level":m["noise_reduction_level"], "declip_level":m["declip_level"], "declick_level":m["declick_level"],
+  "tone_low_db":m["tone_low_db"], "sub_bass_db":m["sub_bass_db"], "tone_mid_db":m["tone_mid_db"], "tone_high_db":m["tone_high_db"], "tone_tilt_db":m["tone_tilt_db"],
+  "saturation_enabled":m["saturation_enabled"], "saturation_per_band":m["saturation_per_band"],
+  "saturation_drive_db":m["saturation_drive_db"], "saturation_mix":m["saturation_mix"], "saturation_type":m["saturation_type"],
+  "glue_enabled":m["glue_enabled"], "glue_threshold_db":m["glue_threshold_db"], "glue_ratio":m["glue_ratio"],
+  "glue_attack_ms":m["glue_attack_ms"], "glue_release_ms":m["glue_release_ms"], "glue_makeup_db":m["glue_makeup_db"],
+  "autogain_maxgain":m["autogain_maxgain"],
+}}
+print(json.dumps(req, ensure_ascii=False))
+PY
+)"
+  BP_RES="$(printf '%s' "$BP_REQ" | "$0" call --json)"
+  readarray -t BP_LINES < <(python3 - <<'PY' "$BP_RES"
+import json,sys
+r=json.loads(sys.argv[1])
+if not r.get("ok"):
+    print(""); print(""); raise SystemExit(1)
+t=r["result"]
+vals=t.get("value",[]) if isinstance(t,dict) else []
+print(vals[0] if len(vals)>0 else "")
+print(vals[1] if len(vals)>1 else "")
+PY
+)
+  PRE_CHAIN="${BP_LINES[0]}"
+  PRE_OUT="${BP_LINES[1]}"
+
+  LOUDNORM_TARGETS="$(python3 - <<'PY' "$META" "$TARGET_LUFS" "$TRUE_PEAK"
+import json,sys
+m=json.loads(sys.argv[1]); target=float(sys.argv[2]); tp=float(sys.argv[3])
+import os
+def b(v, d=False):
+    if v is None: return d
+    if isinstance(v,bool): return v
+    if isinstance(v,(int,float)): return v != 0
+    if isinstance(v,str):
+        t=v.strip().lower()
+        if t in ("1","true","yes","on","si","sí"): return True
+        if t in ("0","false","no","off",""): return False
+    return bool(v)
+def f(v, d=0.0):
+    try: return float(v)
+    except Exception: return float(d)
+lift=0.0
+lift += max(0.0, f(m.get("tone_mid_db",0.0),0.0))*0.25
+lift += max(0.0, f(m.get("sub_bass_db",0.0),0.0))*0.20
+lift += max(0.0, f(m.get("tone_high_db",0.0),0.0)+f(m.get("tone_tilt_db",0.0),0.0))*0.35
+if b(m.get("deesser",False),False): lift += 0.8
+if b(m.get("glue_enabled",False),False): lift += 1.0
+if b(m.get("saturation_enabled",False),False):
+    drive=abs(f(m.get("saturation_drive_db",0.0),0.0))
+    mix=max(0.0,min(1.0,f(m.get("saturation_mix",0.0),0.0)))
+    lift += min(2.0, drive*0.20 + mix*2.0)
+if b(m.get("autogain_enabled",True),True):
+    maxg=max(1.0,f(m.get("autogain_maxgain",1.35),1.35))
+    lift += max(0.0,maxg-1.0)*1.2
+# Compensación empírica por desvío de FFmpeg (calibrable por entorno)
+lufs_comp=f(os.getenv("TONEFINISH_FFMPEG_LUFS_COMP_DB","0.0"),0.0)
+tp_comp=f(os.getenv("TONEFINISH_FFMPEG_TP_COMP_DB","0.0"),0.0)
+lufs_comp=max(-0.60,min(0.60,lufs_comp))
+tp_comp=max(0.0,min(0.90,tp_comp))
+
+# margen dinámico adicional por cadena activa (más cercano al target real)
+margin=min(1.15, 0.22 + lift*0.15)
+target_eff = target + lufs_comp
+tp_eff = tp - margin - tp_comp
+print(f"{target_eff:.3f}")
+print(f"{tp_eff:.3f}")
+PY
+)"
+  TARGET_LUFS_EFFECTIVE="$(printf '%s\n' "$LOUDNORM_TARGETS" | sed -n '1p')"
+  TP_EFFECTIVE="$(printf '%s\n' "$LOUDNORM_TARGETS" | sed -n '2p')"
+  LOUDNORM_FILTER="loudnorm=I=${TARGET_LUFS_EFFECTIVE}:LRA=11:TP=${TP_EFFECTIVE}:print_format=summary"
+
+  FILTER_COMPLEX=""
+  if [[ "$MASTER_ENABLED" == "1" ]]; then
+    if [[ -n "$PRE_CHAIN" && -n "$PRE_OUT" ]]; then
+      FILTER_COMPLEX="${PRE_CHAIN};[${PRE_OUT}]${LOUDNORM_FILTER}[out]"
+    else
+      FILTER_COMPLEX="[0:a]${LOUDNORM_FILTER}[out]"
+    fi
+  else
+    if [[ -n "$PRE_CHAIN" && -n "$PRE_OUT" ]]; then
+      FILTER_COMPLEX="${PRE_CHAIN};[${PRE_OUT}]anull[out]"
+    else
+      FILTER_COMPLEX="[0:a]anull[out]"
+    fi
+  fi
+
+  if [[ "$(python3 - <<'PY' "$FADE_IN"
+import sys; print(1 if float(sys.argv[1])>0 else 0)
+PY
+)" == "1" ]]; then
+    FILTER_COMPLEX="${FILTER_COMPLEX};[out]afade=t=in:ss=0:d=${FADE_IN}[out]"
+  fi
+  if [[ "$(python3 - <<'PY' "$FADE_OUT"
+import sys; print(1 if float(sys.argv[1])>0 else 0)
+PY
+)" == "1" ]]; then
+    DUR="$("$FFPROBE_BIN" -v error -show_entries format=duration -of default=nk=1:nw=1 "$INPUT_PATH" || echo 0)"
+    ST="$(python3 - <<'PY' "$DUR" "$FADE_OUT"
+import sys
+d=float(sys.argv[1] or 0); fo=float(sys.argv[2] or 0)
+print(max(0.0,d-fo))
+PY
+)"
+    FILTER_COMPLEX="${FILTER_COMPLEX};[out]afade=t=out:st=${ST}:d=${FADE_OUT}[out]"
+  fi
+
+  # `loudnorm` puede sacar 192kHz internamente; si no se pidió `output_sr`,
+  # fijamos el sample rate de salida al del archivo de entrada.
+  if [[ -z "$OUTPUT_SR" ]]; then
+    OUTPUT_SR="$("$FFPROBE_BIN" -v error -select_streams a:0 -show_entries stream=sample_rate -of default=nk=1:nw=1 "$INPUT_PATH" 2>/dev/null | head -n1 || true)"
+  fi
+
+  FF_ARGS=()
+  if [[ "$OVERWRITE_FLAG" == "1" ]]; then FF_ARGS+=("-y"); else FF_ARGS+=("-n"); fi
+  FF_ARGS+=("-hide_banner" "-nostdin" "-i" "$INPUT_PATH" "-filter_complex" "$FILTER_COMPLEX" "-map" "[out]")
+  if [[ -n "$OUTPUT_SR" ]]; then FF_ARGS+=("-ar" "$OUTPUT_SR"); fi
+  case "$OUTPUT_FORMAT" in
+    wav)
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-c:a" "pcm_s24le"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-c:a" "pcm_s16le"); fi
+      ;;
+    aiff|aif)
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-c:a" "pcm_s24be"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-c:a" "pcm_s16be"); fi
+      ;;
+    flac)
+      FF_ARGS+=("-c:a" "flac")
+      if [[ "$OUTPUT_BIT_DEPTH" == "16" ]]; then FF_ARGS+=("-sample_fmt" "s16"); fi
+      if [[ "$OUTPUT_BIT_DEPTH" == "24" ]]; then FF_ARGS+=("-sample_fmt" "s32"); fi
+      ;;
+    m4a) FF_ARGS+=("-c:a" "aac" "-b:a" "256k");;
+    mp3) FF_ARGS+=("-c:a" "libmp3lame" "-b:a" "320k");;
+  esac
+  while IFS= read -r meta_line; do FF_ARGS+=("-metadata" "$meta_line"); done < <(python3 - <<'PY' "$METADATA_JSON"
+import json,sys
+m=json.loads(sys.argv[1]) if sys.argv[1].strip() else {}
+for k,v in (m.items() if isinstance(m,dict) else []):
+    if v is None: continue
+    s=str(v)
+    if s: print(f"{k}={s}")
+PY
+)
+  mkdir -p "$(dirname "$OUTPUT_PATH")"
+  FF_ARGS+=("$OUTPUT_PATH")
+
+  NORM_OUT="$("$FFMPEG_BIN" "${FF_ARGS[@]}" 2>&1)"
+  NORM_RC=$?
+  if [[ $NORM_RC -ne 0 ]]; then
+    python3 - <<'PY' "$NORM_OUT"
+import json,sys
+print(json.dumps({"ok": False, "error": "ffmpeg falló en normalize_audio", "raw": sys.argv[1][-2500:]}, ensure_ascii=False))
+PY
+    exit 1
+  fi
+  python3 - <<'PY' "$NORM_OUT"
+import json,sys
+print(json.dumps({"ok": True, "result": sys.argv[1]}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_audio_for_automaster" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+def path_of(v):
+    if isinstance(v,dict) and v.get("__type__")=="path":
+        return str(v.get("value",""))
+    return str(v)
+input_path = path_of(a[0]) if len(a)>0 else path_of(kw.get("input_path",""))
+target_lufs = float(a[1] if len(a)>1 else kw.get("target_lufs",-14.0))
+true_peak = float(a[2] if len(a)>2 else kw.get("true_peak",-1.0))
+print(json.dumps({"input_path":input_path,"target_lufs":target_lufs,"true_peak":true_peak}, ensure_ascii=False))
+PY
+)"
+  INPUT_PATH="$(python3 - <<'PY' "$META"
+import json,sys; print(json.loads(sys.argv[1])["input_path"])
+PY
+)"
+  TARGET_LUFS="$(python3 - <<'PY' "$META"
+import json,sys; print(json.loads(sys.argv[1])["target_lufs"])
+PY
+)"
+  TRUE_PEAK="$(python3 - <<'PY' "$META"
+import json,sys; print(json.loads(sys.argv[1])["true_peak"])
+PY
+)"
+
+  if [[ ! -f "$INPUT_PATH" ]]; then
+    python3 -c 'import json,sys; print(json.dumps({"ok": False, "error": f"archivo no existe: {sys.argv[1]}"}, ensure_ascii=False))' "$INPUT_PATH"
+    exit 1
+  fi
+
+  ANA_REQ="$(python3 - <<'PY' "$INPUT_PATH" "$TARGET_LUFS" "$TRUE_PEAK"
+import json,sys
+print(json.dumps({"method":"analyze_audio","args":[{"__type__":"path","value":sys.argv[1]},float(sys.argv[2]),float(sys.argv[3])],"kwargs":{}}, ensure_ascii=False))
+PY
+)"
+  ANA_RES="$(printf '%s' "$ANA_REQ" | "$0" call --json)"
+
+  EQ_REQ="$(python3 - <<'PY' "$INPUT_PATH"
+import json,sys
+print(json.dumps({"method":"analyze_eq_bands","args":[{"__type__":"path","value":sys.argv[1]},False,3.0],"kwargs":{}}, ensure_ascii=False))
+PY
+)"
+  EQ_RES="$(printf '%s' "$EQ_REQ" | "$0" call --json)"
+
+  VOICE_REQ="$(python3 - <<'PY' "$INPUT_PATH"
+import json,sys
+print(json.dumps({"method":"analyze_voice_band","args":[{"__type__":"path","value":sys.argv[1]},False],"kwargs":{}}, ensure_ascii=False))
+PY
+)"
+  VOICE_RES="$(printf '%s' "$VOICE_REQ" | "$0" call --json)"
+
+  python3 - <<'PY' "$ANA_RES" "$EQ_RES" "$VOICE_RES" "$TARGET_LUFS" "$TRUE_PEAK"
+import json,sys
+ana=json.loads(sys.argv[1]); eq=json.loads(sys.argv[2]); voice=json.loads(sys.argv[3])
+target_lufs=float(sys.argv[4]); true_peak=float(sys.argv[5])
+if not ana.get("ok"):
+    print(json.dumps({"ok": False, "error": "falló analyze_audio", "detail": ana.get("error")}, ensure_ascii=False)); raise SystemExit(1)
+if not eq.get("ok"):
+    print(json.dumps({"ok": False, "error": "falló analyze_eq_bands", "detail": eq.get("error")}, ensure_ascii=False)); raise SystemExit(1)
+if not voice.get("ok"):
+    print(json.dumps({"ok": False, "error": "falló analyze_voice_band", "detail": voice.get("error")}, ensure_ascii=False)); raise SystemExit(1)
+
+stats=(ana.get("result",{}).get("value",[{}, ""])[0]) if isinstance(ana.get("result"),dict) else {}
+band_stats=(eq.get("result",{}).get("value",[{}, []])[0]) if isinstance(eq.get("result"),dict) else {}
+voice_rms=voice.get("result")
+in_i=float(stats.get("input_i",-99.0))
+in_tp=float(stats.get("input_tp",-99.0))
+in_lra=float(stats.get("input_lra",0.0))
+offset=float(stats.get("target_offset",0.0))
+chars={
+  "band_stats": band_stats,
+  "voice_rms": voice_rms,
+  "clipping_info": {"input_tp": in_tp, "near_limit": bool(in_tp >= (true_peak-1.0))},
+  "noise_info": {},
+  "stereo_info": {},
+  "band_peaks": {},
+  "silence_info": {},
+  "loudness": {"input_i": in_i, "input_lra": in_lra, "target_offset": offset},
+}
+reco={
+  "dynamic_eq": bool(in_lra > 6.0),
+  "stereo_width": True,
+  "deesser": bool((voice_rms is not None and float(voice_rms) > -35.0) or ("High-Mid (2k-6k Hz)" in band_stats and float(band_stats.get("High-Mid (2k-6k Hz)",-99)) > -22.0)),
+  # Perfil más conservador: evitar sobrecompresión percibida.
+  "saturation_enabled": bool(in_tp < -8.0 and in_lra >= 6.0),
+  "glue_enabled": bool(in_lra > 7.5),
+  "autogain_enabled": bool(in_lra > 4.8),
+  "autogain_maxgain": 1.35,
+}
+spec={
+  "target_lufs": target_lufs,
+  "true_peak": true_peak,
+  "headroom_db": -17.0,
+  "notes": "MVP automaster via CLI heurístico"
+}
+print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[chars,reco,spec]}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "adapt_preset_to_audio" ]]; then
+  python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+preset = a[0] if len(a)>0 and isinstance(a[0],dict) else (kw.get("preset",{}) if isinstance(kw.get("preset",{}),dict) else {})
+chars = a[1] if len(a)>1 and isinstance(a[1],dict) else (kw.get("characteristics",{}) if isinstance(kw.get("characteristics",{}),dict) else {})
+out=dict(preset)
+
+band_stats = chars.get("band_stats",{}) if isinstance(chars.get("band_stats",{}),dict) else {}
+voice_rms = chars.get("voice_rms")
+loud = chars.get("loudness",{}) if isinstance(chars.get("loudness",{}),dict) else chars.get("loudness_metrics",{}) if isinstance(chars.get("loudness_metrics",{}),dict) else {}
+input_lra = float(loud.get("input_lra",0.0) or 0.0)
+input_tp = float((chars.get("clipping_info",{}) if isinstance(chars.get("clipping_info",{}),dict) else {}).get("input_tp",-99.0) or -99.0)
+
+# Defaults robustos
+out.setdefault("dynamic_eq", False)
+out.setdefault("stereo_width", True)
+out.setdefault("deesser", False)
+out.setdefault("saturation_enabled", False)
+out.setdefault("saturation_per_band", False)
+out.setdefault("glue_enabled", False)
+out.setdefault("autogain_enabled", True)
+out.setdefault("autogain_maxgain", 1.35)
+out.setdefault("headroom_db", -17.0)
+out.setdefault("tone_low_db", 0.0)
+out.setdefault("sub_bass_db", 0.0)
+out.setdefault("tone_mid_db", 0.0)
+out.setdefault("tone_high_db", 0.0)
+out.setdefault("tone_tilt_db", 0.0)
+out.setdefault("saturation_drive_db", 0.0)
+out.setdefault("saturation_mix", 0.0)
+out.setdefault("glue_ratio", 1.4)
+out.setdefault("glue_threshold_db", -18.0)
+out.setdefault("glue_attack_ms", 20.0)
+out.setdefault("glue_release_ms", 120.0)
+
+# Heurísticas de adaptación
+if input_lra > 6.0:
+    out["dynamic_eq"] = True
+    out["glue_enabled"] = bool(input_lra > 7.5)
+    out["autogain_enabled"] = True
+    out["autogain_maxgain"] = min(1.6, float(out.get("autogain_maxgain",1.35) or 1.35))
+elif input_lra < 4.0:
+    out["glue_enabled"] = False
+    out["autogain_enabled"] = False
+    out["autogain_maxgain"] = min(1.25, float(out.get("autogain_maxgain",1.35) or 1.35))
+else:
+    out["glue_enabled"] = False
+    out["autogain_enabled"] = False
+    out["autogain_maxgain"] = min(1.4, float(out.get("autogain_maxgain",1.35) or 1.35))
+
+hm = float(band_stats.get("High-Mid (2k-6k Hz)", -99.0) or -99.0)
+air = float(band_stats.get("Air (6k-16k Hz)", -99.0) or -99.0)
+if (voice_rms is not None and float(voice_rms) > -35.0) or hm > -22.0:
+    out["deesser"] = True
+if hm < -28.0 and air < -31.0:
+    out["tone_high_db"] = min(2.0, float(out.get("tone_high_db",0.0) or 0.0) + 0.8)
+
+if input_tp < -8.0 and input_lra >= 6.0:
+    out["saturation_enabled"] = True
+    out["saturation_mix"] = max(0.08, float(out.get("saturation_mix",0.0) or 0.0))
+    out["saturation_mix"] = min(0.15, float(out.get("saturation_mix",0.0) or 0.0))
+    out["saturation_drive_db"] = max(0.8, float(out.get("saturation_drive_db",0.0) or 0.0))
+    out["saturation_drive_db"] = min(1.5, float(out.get("saturation_drive_db",0.0) or 0.0))
+else:
+    out["saturation_enabled"] = False
+    out["saturation_mix"] = min(0.08, float(out.get("saturation_mix",0.0) or 0.0))
+
+print(json.dumps({"ok": True, "result": out}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "analyze_batch_for_automaster" ]]; then
+  META="$(python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+files=a[0] if len(a)>0 else kw.get("files",[])
+target_lufs=float(a[1] if len(a)>1 else kw.get("target_lufs",-14.0))
+true_peak=float(a[2] if len(a)>2 else kw.get("true_peak",-1.0))
+norm=[]
+for f in (files if isinstance(files,list) else []):
+    if isinstance(f,dict) and f.get("__type__")=="path":
+        norm.append(str(f.get("value","")))
+    else:
+        norm.append(str(f))
+print(json.dumps({"files":norm,"target_lufs":target_lufs,"true_peak":true_peak}, ensure_ascii=False))
+PY
+)"
+
+  python3 - <<'PY' "$META" "$0"
+import json,sys,subprocess,os
+meta=json.loads(sys.argv[1]); cli=sys.argv[2]
+files=meta.get("files",[])
+target=float(meta.get("target_lufs",-14.0))
+tp=float(meta.get("true_peak",-1.0))
+
+individual={}
+char_list=[]
+reco_list=[]
+
+for p in files:
+    req={
+      "method":"analyze_audio_for_automaster",
+      "args":[{"__type__":"path","value":p},target,tp],
+      "kwargs":{}
+    }
+    proc=subprocess.run([cli,"call","--json"],input=json.dumps(req),text=True,capture_output=True)
+    if proc.returncode!=0:
+      continue
+    try:
+      out=json.loads(proc.stdout or "{}")
+    except Exception:
+      continue
+    if not out.get("ok"):
+      continue
+    result=out.get("result",{})
+    vals=result.get("value",[]) if isinstance(result,dict) else []
+    if len(vals)<3:
+      continue
+    chars,reco,spec=vals[0],vals[1],vals[2]
+    individual[p]={"characteristics":chars,"recommendation":reco,"spec":spec}
+    if isinstance(chars,dict): char_list.append(chars)
+    if isinstance(reco,dict): reco_list.append(reco)
+
+if not individual:
+    print(json.dumps({"ok": False, "error":"no se pudo analizar ningún archivo del lote"}, ensure_ascii=False))
+    raise SystemExit(1)
+
+# Merge simple
+merged={"band_stats":{}, "voice_rms": None, "loudness_metrics":{}}
+voice_vals=[]
+li=[]; lra=[]; tp_vals=[]
+acc={}
+count={}
+for c in char_list:
+    bs=c.get("band_stats",{}) if isinstance(c.get("band_stats",{}),dict) else {}
+    for k,v in bs.items():
+      try:
+        fv=float(v)
+      except Exception:
+        continue
+      acc[k]=acc.get(k,0.0)+fv
+      count[k]=count.get(k,0)+1
+    vr=c.get("voice_rms")
+    if isinstance(vr,(int,float)): voice_vals.append(float(vr))
+    loud=c.get("loudness",{}) if isinstance(c.get("loudness",{}),dict) else {}
+    if isinstance(loud.get("input_i"),(int,float)): li.append(float(loud["input_i"]))
+    if isinstance(loud.get("input_lra"),(int,float)): lra.append(float(loud["input_lra"]))
+    clip=c.get("clipping_info",{}) if isinstance(c.get("clipping_info",{}),dict) else {}
+    if isinstance(clip.get("input_tp"),(int,float)): tp_vals.append(float(clip["input_tp"]))
+for k,s in acc.items():
+    merged["band_stats"][k]=s/max(1,count.get(k,1))
+if voice_vals:
+    merged["voice_rms"]=sum(voice_vals)/len(voice_vals)
+merged["loudness_metrics"]={
+  "input_i": (sum(li)/len(li)) if li else None,
+  "input_lra": (sum(lra)/len(lra)) if lra else None,
+  "input_tp": max(tp_vals) if tp_vals else None,
+}
+
+# Reco consolidada por mayoría
+def maj(key, default=False):
+    vals=[bool(r.get(key,default)) for r in reco_list if isinstance(r,dict)]
+    if not vals: return bool(default)
+    return sum(1 for v in vals if v) >= (len(vals)/2.0)
+reco={
+  "dynamic_eq": maj("dynamic_eq", False),
+  "stereo_width": maj("stereo_width", True),
+  "deesser": maj("deesser", False),
+  "saturation_enabled": maj("saturation_enabled", False),
+  "glue_enabled": maj("glue_enabled", False),
+}
+
+print(json.dumps({"ok": True, "result": {"__type__":"tuple","value":[merged,reco,individual]}}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "update_saturation_budgets_for_batch" ]]; then
+  python3 - <<'PY' "$REQ"
+import json,sys
+d=json.loads(sys.argv[1]); a=d.get("args",[]); kw=d.get("kwargs",{}) or {}
+batch = a[0] if len(a)>0 and isinstance(a[0],dict) else (kw.get("batch_data",{}) if isinstance(kw.get("batch_data",{}),dict) else {})
+
+# Extraer nivel relativo de riesgo por archivo
+entries=[]
+for k,v in batch.items():
+    if not isinstance(v,dict):
+        continue
+    chars=v.get("characteristics",{}) if isinstance(v.get("characteristics",{}),dict) else {}
+    loud=chars.get("loudness",{}) if isinstance(chars.get("loudness",{}),dict) else chars.get("loudness_metrics",{}) if isinstance(chars.get("loudness_metrics",{}),dict) else {}
+    clip=chars.get("clipping_info",{}) if isinstance(chars.get("clipping_info",{}),dict) else {}
+    lra=float(loud.get("input_lra",0.0) or 0.0)
+    tp=float(clip.get("input_tp",-99.0) or -99.0)
+    risk=0.0
+    if tp > -3.0: risk += 1.0
+    if tp > -2.0: risk += 1.0
+    if lra < 4.0: risk += 0.8
+    if lra > 7.5: risk -= 0.3
+    entries.append((k,risk))
+
+# Ordenar por riesgo y asignar budget de saturación
+entries.sort(key=lambda x: x[1], reverse=True)
+out={}
+n=max(1,len(entries))
+for i,(k,risk) in enumerate(entries):
+    base=batch.get(k,{}) if isinstance(batch.get(k,{}),dict) else {}
+    nv=dict(base)
+    reco=nv.get("recommendation",{}) if isinstance(nv.get("recommendation",{}),dict) else {}
+    # más riesgo => menos saturación
+    rank=i/(n-1) if n>1 else 0.0
+    mix=max(0.15, 0.40 - 0.20*rank - 0.05*max(0.0,risk))
+    drive=max(1.0, 2.4 - 1.0*rank - 0.3*max(0.0,risk))
+    reco["saturation_enabled"]=bool(reco.get("saturation_enabled", False))
+    reco["saturation_mix"]=round(mix,3)
+    reco["saturation_drive_db"]=round(drive,3)
+    nv["recommendation"]=reco
+    nv["saturation_budget"]={
+      "risk": round(risk,3),
+      "rank": round(rank,3),
+      "mix": round(mix,3),
+      "drive_db": round(drive,3),
+    }
+    out[k]=nv
+
+print(json.dumps({"ok": True, "result": out}, ensure_ascii=False))
+PY
+  exit $?
+fi
+
+if [[ "$METHOD" == "health" ]]; then
+  CORE_OUT="$(printf '%s\n' "$METHOD" | "$SPASM_BIN" "$CORE_SCRIPT" 2>/dev/null || true)"
+  STATUS="$(printf '%s\n' "$CORE_OUT" | sed -n '1p')"
+  VALUE="$(printf '%s\n' "$CORE_OUT" | sed -n '2p')"
+  if [[ "$STATUS" == "OK" ]]; then
+    python3 -c 'import json,sys; v=sys.argv[1]; print(json.dumps({"ok": True, "result": v}, ensure_ascii=False))' "$VALUE"
+    exit 0
+  fi
+fi
+
+python3 -c 'import json,sys; m=sys.argv[1]; print(json.dumps({"ok": False, "error": f"método no implementado aún en SpASM CLI: {m}"}, ensure_ascii=False))' "$METHOD"
+exit 1
